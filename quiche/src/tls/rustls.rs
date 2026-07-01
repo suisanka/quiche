@@ -46,6 +46,7 @@ use ::rustls::crypto::Identity;
 use ::rustls::crypto::SignatureScheme;
 use ::rustls::crypto::SingleCredential;
 use ::rustls::crypto::TicketProducer;
+use ::rustls::error::CertificateError;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
@@ -62,6 +63,7 @@ use aws_lc_rs::cipher::AES_CBC_IV_LEN;
 use aws_lc_rs::hmac;
 use aws_lc_rs::iv;
 use aws_lc_rs::rand;
+use aws_lc_rs::signature;
 
 use crate::crypto;
 use crate::packet;
@@ -121,6 +123,8 @@ impl Context {
             write_level: crypto::Level::Initial,
             early_data_active: false,
             signature_scheme: Arc::new(Mutex::new(None)),
+            peer_identity_recorder: Arc::new(Mutex::new(None)),
+            recorded_peer_identity: None,
             session_store: Arc::new(QuicheClientSessionStore::new()),
         })
     }
@@ -231,6 +235,8 @@ pub struct Handshake {
     write_level: crypto::Level,
     early_data_active: bool,
     signature_scheme: Arc<Mutex<Option<SignatureScheme>>>,
+    peer_identity_recorder: RecordedPeerIdentity,
+    recorded_peer_identity: Option<Identity<'static>>,
     session_store: Arc<QuicheClientSessionStore>,
 }
 
@@ -290,13 +296,17 @@ impl Handshake {
     pub fn provide_data(
         &mut self, _level: crypto::Level, buf: &[u8],
     ) -> Result<()> {
-        self.connection()?.read_hs(buf).map_err(|_| Error::TlsFail)
+        let result = self.connection()?.read_hs(buf).map_err(|_| Error::TlsFail);
+        self.flush_recorded_peer_identity();
+
+        result
     }
 
     pub fn do_handshake(&mut self, ex_data: &mut ExData) -> Result<()> {
         observe_ex_data(ex_data);
         self.sync_ex_data(ex_data);
         self.flush_handshake_data(ex_data)?;
+        self.flush_recorded_peer_identity();
         self.flush_keylog(ex_data);
         self.flush_session(ex_data);
 
@@ -354,6 +364,10 @@ impl Handshake {
         if let Ok(mut scheme) = self.signature_scheme.lock() {
             *scheme = None;
         }
+        if let Ok(mut identity) = self.peer_identity_recorder.lock() {
+            *identity = None;
+        }
+        self.recorded_peer_identity = None;
 
         Ok(())
     }
@@ -376,11 +390,19 @@ impl Handshake {
     }
 
     pub fn peer_cert_chain(&self) -> Option<Vec<&[u8]>> {
-        peer_cert_chain(self.conn.as_ref()?.peer_identity()?)
+        self.conn
+            .as_ref()
+            .and_then(|conn| conn.peer_identity())
+            .or(self.recorded_peer_identity.as_ref())
+            .and_then(peer_cert_chain)
     }
 
     pub fn peer_cert(&self) -> Option<&[u8]> {
-        peer_cert(self.conn.as_ref()?.peer_identity()?)
+        self.conn
+            .as_ref()
+            .and_then(|conn| conn.peer_identity())
+            .or(self.recorded_peer_identity.as_ref())
+            .and_then(peer_cert)
     }
 
     #[cfg(test)]
@@ -421,8 +443,9 @@ impl Handshake {
                     return Err(Error::TlsFail);
                 }
 
+                let root_store = Arc::new(self.root_store.clone());
                 let verifier = ::rustls::client::WebPkiServerVerifier::builder(
-                    Arc::new(self.root_store.clone()),
+                    root_store.clone(),
                     &self.provider,
                 )
                 .build()
@@ -434,6 +457,7 @@ impl Handshake {
                         RecordingServerVerifier::new(
                             Arc::new(verifier),
                             self.signature_scheme.clone(),
+                            root_store,
                         ),
                     ))
             },
@@ -504,24 +528,30 @@ impl Handshake {
             ::rustls::ServerConfig::builder(Arc::clone(&self.provider));
         let config_builder = match self.verify {
             true => {
-                if self.root_store.is_empty() {
-                    return Err(Error::TlsFail);
-                }
+                let verifier = if self.root_store.is_empty() {
+                    RecordingClientVerifier::without_roots(
+                        &self.provider,
+                        self.signature_scheme.clone(),
+                        self.peer_identity_recorder.clone(),
+                    )
+                } else {
+                    let verifier =
+                        ::rustls::server::WebPkiClientVerifier::builder(
+                            Arc::new(self.root_store.clone()),
+                            &self.provider,
+                        )
+                        .allow_unauthenticated()
+                        .build()
+                        .map_err(|_| Error::TlsFail)?;
 
-                let verifier = ::rustls::server::WebPkiClientVerifier::builder(
-                    Arc::new(self.root_store.clone()),
-                    &self.provider,
-                )
-                .allow_unauthenticated()
-                .build()
-                .map_err(|_| Error::TlsFail)?;
-
-                config_builder.with_client_cert_verifier(Arc::new(
                     RecordingClientVerifier::new(
                         Arc::new(verifier),
                         self.signature_scheme.clone(),
-                    ),
-                ))
+                        self.peer_identity_recorder.clone(),
+                    )
+                };
+
+                config_builder.with_client_cert_verifier(Arc::new(verifier))
             },
 
             false => config_builder.with_no_client_auth(),
@@ -606,6 +636,16 @@ impl Handshake {
     fn flush_session(&self, ex_data: &mut ExData) {
         if let Some(session) = self.session_store.take_exported_session() {
             *ex_data.session = Some(session);
+        }
+    }
+
+    fn flush_recorded_peer_identity(&mut self) {
+        if self.recorded_peer_identity.is_some() {
+            return;
+        }
+
+        if let Ok(mut identity) = self.peer_identity_recorder.lock() {
+            self.recorded_peer_identity = identity.take();
         }
     }
 
@@ -782,6 +822,491 @@ fn peer_cert<'a>(identity: &'a Identity<'static>) -> Option<&'a [u8]> {
         },
 
         _ => None,
+    }
+}
+
+fn certificate_name_error(error: &::rustls::Error) -> bool {
+    matches!(
+        error,
+        ::rustls::Error::InvalidCertificate(
+            CertificateError::NotValidForName |
+                CertificateError::NotValidForNameContext { .. }
+        )
+    )
+}
+
+fn unsupported_cert_version_error(error: &::rustls::Error) -> bool {
+    matches!(
+        error,
+        ::rustls::Error::InvalidCertificate(CertificateError::Other(e))
+            if format!("{e:?}").contains("UnsupportedCertVersion")
+    )
+}
+
+fn common_name_matches_server_name(
+    cert: &[u8], server_name: &::rustls::pki_types::ServerName<'_>,
+) -> bool {
+    let server_name = server_name.to_str();
+
+    common_names(cert).any(|name| name.eq_ignore_ascii_case(&server_name))
+}
+
+fn common_names(cert: &[u8]) -> impl Iterator<Item = &str> {
+    let subject = certificate_subject(cert).unwrap_or(&[]);
+
+    DerReader::new(subject).flat_map(|set| {
+        let Some((0x31, set)) = set else {
+            return None;
+        };
+
+        let Some((0x30, attribute)) = DerReader::new(set).next().flatten() else {
+            return None;
+        };
+
+        let mut attribute = DerReader::new(attribute);
+        let Some((0x06, oid)) = attribute.next().flatten() else {
+            return None;
+        };
+
+        let common_name_oid = [0x55, 0x04, 0x03];
+        if oid != common_name_oid {
+            return None;
+        }
+
+        let (tag, value) = attribute.next().flatten()?;
+        match tag {
+            0x0c | 0x13 | 0x16 => std::str::from_utf8(value).ok(),
+
+            _ => None,
+        }
+    })
+}
+
+fn certificate_subject(cert: &[u8]) -> Option<&[u8]> {
+    let mut cert = DerReader::new(cert);
+    let Some((0x30, cert, _)) = cert.next_raw().flatten() else {
+        return None;
+    };
+
+    let mut cert = DerReader::new(cert);
+    let Some((0x30, tbs, _)) = cert.next_raw().flatten() else {
+        return None;
+    };
+
+    let mut tbs = DerReader::new(tbs);
+
+    if matches!(tbs.peek_tag(), Some(0xa0)) {
+        tbs.next().flatten()?;
+    }
+
+    tbs.next().flatten()?;
+    tbs.next().flatten()?;
+    tbs.next().flatten()?;
+    tbs.next().flatten()?;
+
+    let Some((0x30, subject)) = tbs.next().flatten() else {
+        return None;
+    };
+
+    Some(subject)
+}
+
+fn certificate_subject_public_key_info(cert: &[u8]) -> Option<&[u8]> {
+    let mut cert = DerReader::new(cert);
+    let Some((0x30, cert, _)) = cert.next_raw().flatten() else {
+        return None;
+    };
+
+    let mut cert = DerReader::new(cert);
+    let Some((0x30, tbs, _)) = cert.next_raw().flatten() else {
+        return None;
+    };
+
+    let mut tbs = DerReader::new(tbs);
+
+    if matches!(tbs.peek_tag(), Some(0xa0)) {
+        tbs.next().flatten()?;
+    }
+
+    tbs.next().flatten()?;
+    tbs.next().flatten()?;
+    tbs.next().flatten()?;
+    tbs.next().flatten()?;
+    tbs.next().flatten()?;
+
+    let Some((0x30, _, spki_raw)) = tbs.next_raw().flatten() else {
+        return None;
+    };
+
+    Some(spki_raw)
+}
+
+struct LegacyCertificate<'a> {
+    tbs: &'a [u8],
+    signature_algorithm: &'a [u8],
+    not_before: u64,
+    not_after: u64,
+    signature: &'a [u8],
+}
+
+fn legacy_v1_certificate(cert: &[u8]) -> Option<LegacyCertificate<'_>> {
+    let mut cert = DerReader::new(cert);
+    let Some((0x30, cert, _)) = cert.next_raw().flatten() else {
+        return None;
+    };
+
+    let mut cert = DerReader::new(cert);
+    let Some((0x30, tbs, tbs_raw)) = cert.next_raw().flatten() else {
+        return None;
+    };
+    let Some((0x30, signature_algorithm, _)) = cert.next_raw().flatten() else {
+        return None;
+    };
+    let Some((0x03, signature, _)) = cert.next_raw().flatten() else {
+        return None;
+    };
+
+    let mut tbs = DerReader::new(tbs);
+    if matches!(tbs.peek_tag(), Some(0xa0)) {
+        return None;
+    }
+
+    tbs.next().flatten()?;
+    let Some((0x30, tbs_signature_algorithm)) = tbs.next().flatten() else {
+        return None;
+    };
+    if tbs_signature_algorithm != signature_algorithm {
+        return None;
+    }
+
+    let Some((0x30, _)) = tbs.next().flatten() else {
+        return None;
+    };
+    let Some((0x30, validity)) = tbs.next().flatten() else {
+        return None;
+    };
+    let mut validity = DerReader::new(validity);
+    let (not_before_tag, not_before) = validity.next().flatten()?;
+    let (not_after_tag, not_after) = validity.next().flatten()?;
+    let not_before = der_time(not_before_tag, not_before)?;
+    let not_after = der_time(not_after_tag, not_after)?;
+
+    tbs.next().flatten()?;
+    let Some((0x30, ..)) = tbs.next_raw().flatten() else {
+        return None;
+    };
+
+    let signature = match signature {
+        [0, signature @ ..] => signature,
+
+        _ => return None,
+    };
+
+    Some(LegacyCertificate {
+        tbs: tbs_raw,
+        signature_algorithm,
+        not_before,
+        not_after,
+        signature,
+    })
+}
+
+fn valid_at(
+    cert: &LegacyCertificate<'_>, now: ::rustls::pki_types::UnixTime,
+) -> bool {
+    cert.not_before <= now.as_secs() && now.as_secs() <= cert.not_after
+}
+
+fn legacy_v1_server_identity_valid(
+    root_store: &RootCertStore, identity: &Identity<'_>,
+    server_name: &::rustls::pki_types::ServerName<'_>,
+    now: ::rustls::pki_types::UnixTime,
+) -> bool {
+    let Identity::X509(certificates) = identity else {
+        return false;
+    };
+
+    if !certificates.intermediates.is_empty() ||
+        !common_name_matches_server_name(
+            certificates.end_entity.as_ref(),
+            server_name,
+        )
+    {
+        return false;
+    }
+
+    let Some(cert) = legacy_v1_certificate(certificates.end_entity.as_ref())
+    else {
+        return false;
+    };
+
+    if !valid_at(&cert, now) ||
+        !legacy_sha256_rsa_signature_algorithm(cert.signature_algorithm)
+    {
+        return false;
+    }
+
+    root_store.roots.iter().any(|root| {
+        if root.name_constraints.is_some() {
+            return false;
+        }
+
+        let public_key = der_sequence(root.subject_public_key_info.as_ref());
+        signature::UnparsedPublicKey::new(
+            &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
+            public_key,
+        )
+        .verify(cert.tbs, cert.signature)
+        .is_ok()
+    })
+}
+
+fn legacy_sha256_rsa_signature_algorithm(algorithm: &[u8]) -> bool {
+    let mut algorithm = DerReader::new(algorithm);
+    let Some((0x06, oid)) = algorithm.next().flatten() else {
+        return false;
+    };
+
+    oid == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]
+}
+
+fn legacy_handshake_signature_algorithm(
+    scheme: SignatureScheme,
+) -> Option<&'static dyn signature::VerificationAlgorithm> {
+    Some(match scheme {
+        SignatureScheme::RSA_PKCS1_SHA1 =>
+            &signature::RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY,
+
+        SignatureScheme::RSA_PKCS1_SHA256 =>
+            &signature::RSA_PKCS1_2048_8192_SHA256,
+
+        SignatureScheme::RSA_PKCS1_SHA384 =>
+            &signature::RSA_PKCS1_2048_8192_SHA384,
+
+        SignatureScheme::RSA_PKCS1_SHA512 =>
+            &signature::RSA_PKCS1_2048_8192_SHA512,
+
+        SignatureScheme::RSA_PSS_SHA256 => &signature::RSA_PSS_2048_8192_SHA256,
+
+        SignatureScheme::RSA_PSS_SHA384 => &signature::RSA_PSS_2048_8192_SHA384,
+
+        SignatureScheme::RSA_PSS_SHA512 => &signature::RSA_PSS_2048_8192_SHA512,
+
+        SignatureScheme::ECDSA_NISTP256_SHA256 =>
+            &signature::ECDSA_P256_SHA256_ASN1,
+
+        SignatureScheme::ECDSA_NISTP384_SHA384 =>
+            &signature::ECDSA_P384_SHA384_ASN1,
+
+        SignatureScheme::ECDSA_NISTP521_SHA512 =>
+            &signature::ECDSA_P521_SHA512_ASN1,
+
+        SignatureScheme::ED25519 => &signature::ED25519,
+
+        _ => return None,
+    })
+}
+
+fn legacy_handshake_signature_valid(
+    input: &::rustls::client::danger::SignatureVerificationInput,
+) -> bool {
+    let Some(algorithm) =
+        legacy_handshake_signature_algorithm(input.signature.scheme)
+    else {
+        return false;
+    };
+
+    let Some(public_key) = (match input.signer {
+        ::rustls::SignerPublicKey::X509(cert) => {
+            if legacy_v1_certificate(cert.as_ref()).is_none() {
+                return false;
+            }
+
+            certificate_subject_public_key_info(cert.as_ref())
+        },
+
+        ::rustls::SignerPublicKey::RawPublicKey(spki) => Some(spki.as_ref()),
+
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    signature::UnparsedPublicKey::new(algorithm, public_key)
+        .verify(input.message, input.signature.signature())
+        .is_ok()
+}
+
+fn der_time(tag: u8, value: &[u8]) -> Option<u64> {
+    let (year, value) = match (tag, value.len()) {
+        (0x17, 13) => {
+            let year = decimal(&value[..2])?;
+            let year = if year >= 50 { 1900 + year } else { 2000 + year };
+
+            (year, &value[2..])
+        },
+
+        (0x18, 15) => (decimal(&value[..4])?, &value[4..]),
+
+        _ => return None,
+    };
+
+    if value.last().copied() != Some(b'Z') {
+        return None;
+    }
+
+    let month = decimal(&value[0..2])?;
+    let day = decimal(&value[2..4])?;
+    let hour = decimal(&value[4..6])?;
+    let minute = decimal(&value[6..8])?;
+    let second = decimal(&value[8..10])?;
+
+    unix_time(year as i64, month, day, hour, minute, second)
+}
+
+fn decimal(input: &[u8]) -> Option<u32> {
+    input.iter().try_fold(0u32, |value, b| {
+        b.is_ascii_digit()
+            .then_some(value * 10 + u32::from(b - b'0'))
+    })
+}
+
+fn unix_time(
+    year: i64, month: u32, day: u32, hour: u32, minute: u32, second: u32,
+) -> Option<u64> {
+    if !(1..=12).contains(&month) ||
+        day == 0 ||
+        day > days_in_month(year, month)? ||
+        hour > 23 ||
+        minute > 59 ||
+        second > 59
+    {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day)?;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+
+    u64::try_from(seconds).ok()
+}
+
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+
+        4 | 6 | 9 | 11 => 30,
+
+        2 if leap_year(year) => 29,
+
+        2 => 28,
+
+        _ => return None,
+    })
+}
+
+fn leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_from_civil(mut year: i64, month: u32, day: u32) -> Option<i64> {
+    year -= i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year =
+        (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+
+    era.checked_mul(146_097)?
+        .checked_add(day_of_era)?
+        .checked_sub(719_468)
+}
+
+fn der_sequence(value: &[u8]) -> Vec<u8> {
+    let mut der = Vec::with_capacity(value.len() + 5);
+    der.push(0x30);
+    encode_der_len(value.len(), &mut der);
+    der.extend_from_slice(value);
+
+    der
+}
+
+fn encode_der_len(len: usize, out: &mut Vec<u8>) {
+    if len < 0x80 {
+        out.push(len as u8);
+        return;
+    }
+
+    let len_bytes = len.to_be_bytes();
+    let first = len_bytes
+        .iter()
+        .position(|b| *b != 0)
+        .unwrap_or(len_bytes.len() - 1);
+    out.push(0x80 | u8::try_from(len_bytes.len() - first).unwrap_or(0));
+    out.extend_from_slice(&len_bytes[first..]);
+}
+
+struct DerReader<'a> {
+    input: &'a [u8],
+}
+
+impl<'a> DerReader<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input }
+    }
+
+    fn peek_tag(&self) -> Option<u8> {
+        self.input.first().copied()
+    }
+
+    fn next_raw(&mut self) -> Option<Option<(u8, &'a [u8], &'a [u8])>> {
+        let original = self.input;
+        let tag = *self.input.first()?;
+        let len_start = 1;
+        let first_len = *self.input.get(len_start)?;
+        let (len, len_size) = if first_len & 0x80 == 0 {
+            (first_len as usize, 1)
+        } else {
+            let len_len = (first_len & 0x7f) as usize;
+            if len_len == 0 || self.input.len() < len_start + 1 + len_len {
+                self.input = &[];
+                return Some(None);
+            }
+
+            let mut len = 0usize;
+            for b in &self.input[len_start + 1..len_start + 1 + len_len] {
+                len = len.checked_mul(256)?.checked_add(*b as usize)?;
+            }
+
+            (len, 1 + len_len)
+        };
+
+        let value_start = len_start + len_size;
+        let value_end = value_start.checked_add(len)?;
+        if self.input.len() < value_end {
+            self.input = &[];
+            return Some(None);
+        }
+
+        let value = &self.input[value_start..value_end];
+        self.input = &self.input[value_end..];
+
+        Some(Some((tag, value, &original[..value_end])))
+    }
+}
+
+impl<'a> Iterator for DerReader<'a> {
+    type Item = Option<(u8, &'a [u8])>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_raw()
+            .map(|item| item.map(|(tag, value, _)| (tag, value)))
     }
 }
 
@@ -1219,6 +1744,7 @@ impl fmt::Debug for QuicheTicketProducer {
 }
 
 type RecordedSignatureScheme = Arc<Mutex<Option<SignatureScheme>>>;
+type RecordedPeerIdentity = Arc<Mutex<Option<Identity<'static>>>>;
 
 fn record_signature_scheme(
     signature_scheme: &RecordedSignatureScheme,
@@ -1233,17 +1759,76 @@ fn record_signature_scheme(
 struct RecordingServerVerifier {
     inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
     signature_scheme: RecordedSignatureScheme,
+    root_store: Arc<RootCertStore>,
 }
 
 impl RecordingServerVerifier {
     fn new(
         inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
         signature_scheme: RecordedSignatureScheme,
+        root_store: Arc<RootCertStore>,
     ) -> Self {
         Self {
             inner,
             signature_scheme,
+            root_store,
         }
+    }
+
+    fn verify_identity_with_cn_fallback(
+        &self, identity: &::rustls::client::danger::ServerIdentity,
+        error: ::rustls::Error,
+    ) -> std::result::Result<
+        ::rustls::client::danger::PeerVerified,
+        ::rustls::Error,
+    > {
+        if !certificate_name_error(&error) {
+            return Err(error);
+        }
+
+        let Identity::X509(certificates) = identity.identity else {
+            return Err(error);
+        };
+
+        if common_name_matches_server_name(
+            certificates.end_entity.as_ref(),
+            identity.server_name,
+        ) {
+            return Ok(::rustls::client::danger::PeerVerified::assertion());
+        }
+
+        Err(error)
+    }
+
+    fn verify_legacy_v1_identity(
+        &self, identity: &::rustls::client::danger::ServerIdentity,
+    ) -> bool {
+        legacy_v1_server_identity_valid(
+            &self.root_store,
+            identity.identity,
+            identity.server_name,
+            identity.now,
+        )
+    }
+
+    fn verify_legacy_v1_signature(
+        &self, input: &::rustls::client::danger::SignatureVerificationInput,
+        error: ::rustls::Error,
+    ) -> std::result::Result<
+        ::rustls::client::danger::HandshakeSignatureValid,
+        ::rustls::Error,
+    > {
+        if unsupported_cert_version_error(&error) &&
+            legacy_handshake_signature_valid(input)
+        {
+            record_signature_scheme(&self.signature_scheme, input);
+
+            return Ok(
+                ::rustls::client::danger::HandshakeSignatureValid::assertion(),
+            );
+        }
+
+        Err(error)
     }
 }
 
@@ -1254,7 +1839,21 @@ impl ::rustls::client::danger::ServerVerifier for RecordingServerVerifier {
         ::rustls::client::danger::PeerVerified,
         ::rustls::Error,
     > {
-        self.inner.verify_identity(identity)
+        match self.inner.verify_identity(identity) {
+            Ok(verified) => Ok(verified),
+
+            Err(e) => {
+                if unsupported_cert_version_error(&e) &&
+                    self.verify_legacy_v1_identity(identity)
+                {
+                    return Ok(
+                        ::rustls::client::danger::PeerVerified::assertion(),
+                    );
+                }
+
+                self.verify_identity_with_cn_fallback(identity, e)
+            },
+        }
     }
 
     fn verify_tls12_signature(
@@ -1263,12 +1862,15 @@ impl ::rustls::client::danger::ServerVerifier for RecordingServerVerifier {
         ::rustls::client::danger::HandshakeSignatureValid,
         ::rustls::Error,
     > {
-        let result = self.inner.verify_tls12_signature(input);
-        if result.is_ok() {
-            record_signature_scheme(&self.signature_scheme, input);
-        }
+        match self.inner.verify_tls12_signature(input) {
+            Ok(verified) => {
+                record_signature_scheme(&self.signature_scheme, input);
 
-        result
+                Ok(verified)
+            },
+
+            Err(e) => self.verify_legacy_v1_signature(input, e),
+        }
     }
 
     fn verify_tls13_signature(
@@ -1277,12 +1879,15 @@ impl ::rustls::client::danger::ServerVerifier for RecordingServerVerifier {
         ::rustls::client::danger::HandshakeSignatureValid,
         ::rustls::Error,
     > {
-        let result = self.inner.verify_tls13_signature(input);
-        if result.is_ok() {
-            record_signature_scheme(&self.signature_scheme, input);
-        }
+        match self.inner.verify_tls13_signature(input) {
+            Ok(verified) => {
+                record_signature_scheme(&self.signature_scheme, input);
 
-        result
+                Ok(verified)
+            },
+
+            Err(e) => self.verify_legacy_v1_signature(input, e),
+        }
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -1310,18 +1915,48 @@ impl ::rustls::client::danger::ServerVerifier for RecordingServerVerifier {
 
 #[derive(Debug)]
 struct RecordingClientVerifier {
-    inner: Arc<dyn ::rustls::server::danger::ClientVerifier>,
+    inner: Option<Arc<dyn ::rustls::server::danger::ClientVerifier>>,
     signature_scheme: RecordedSignatureScheme,
+    peer_identity: RecordedPeerIdentity,
+    supported_schemes: Vec<SignatureScheme>,
 }
 
 impl RecordingClientVerifier {
     fn new(
         inner: Arc<dyn ::rustls::server::danger::ClientVerifier>,
         signature_scheme: RecordedSignatureScheme,
+        peer_identity: RecordedPeerIdentity,
+    ) -> Self {
+        let supported_schemes = inner.supported_verify_schemes();
+
+        Self {
+            inner: Some(inner),
+            signature_scheme,
+            peer_identity,
+            supported_schemes,
+        }
+    }
+
+    fn without_roots(
+        provider: &::rustls::crypto::CryptoProvider,
+        signature_scheme: RecordedSignatureScheme,
+        peer_identity: RecordedPeerIdentity,
     ) -> Self {
         Self {
-            inner,
+            inner: None,
             signature_scheme,
+            peer_identity,
+            supported_schemes: provider
+                .signature_verification_algorithms
+                .supported_schemes(),
+        }
+    }
+
+    fn record_peer_identity(
+        &self, identity: &::rustls::server::danger::ClientIdentity,
+    ) {
+        if let Ok(mut peer_identity) = self.peer_identity.lock() {
+            *peer_identity = Some(identity.identity.clone().into_owned());
         }
     }
 }
@@ -1333,7 +1968,13 @@ impl ::rustls::server::danger::ClientVerifier for RecordingClientVerifier {
         ::rustls::server::danger::PeerVerified,
         ::rustls::Error,
     > {
-        self.inner.verify_identity(identity)
+        self.record_peer_identity(identity);
+
+        match &self.inner {
+            Some(inner) => inner.verify_identity(identity),
+
+            None => Err(CertificateError::UnknownIssuer.into()),
+        }
     }
 
     fn verify_tls12_signature(
@@ -1342,7 +1983,11 @@ impl ::rustls::server::danger::ClientVerifier for RecordingClientVerifier {
         ::rustls::client::danger::HandshakeSignatureValid,
         ::rustls::Error,
     > {
-        let result = self.inner.verify_tls12_signature(input);
+        let result = match &self.inner {
+            Some(inner) => inner.verify_tls12_signature(input),
+
+            None => Err(CertificateError::UnknownIssuer.into()),
+        };
         if result.is_ok() {
             record_signature_scheme(&self.signature_scheme, input);
         }
@@ -1356,7 +2001,11 @@ impl ::rustls::server::danger::ClientVerifier for RecordingClientVerifier {
         ::rustls::client::danger::HandshakeSignatureValid,
         ::rustls::Error,
     > {
-        let result = self.inner.verify_tls13_signature(input);
+        let result = match &self.inner {
+            Some(inner) => inner.verify_tls13_signature(input),
+
+            None => Err(CertificateError::UnknownIssuer.into()),
+        };
         if result.is_ok() {
             record_signature_scheme(&self.signature_scheme, input);
         }
@@ -1365,25 +2014,35 @@ impl ::rustls::server::danger::ClientVerifier for RecordingClientVerifier {
     }
 
     fn root_hint_subjects(&self) -> Arc<[DistinguishedName]> {
-        self.inner.root_hint_subjects()
+        match &self.inner {
+            Some(inner) => inner.root_hint_subjects(),
+
+            None => Arc::from([]),
+        }
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        self.inner.client_auth_mandatory()
+        self.inner
+            .as_ref()
+            .is_some_and(|inner| inner.client_auth_mandatory())
     }
 
     fn offer_client_auth(&self) -> bool {
-        self.inner.offer_client_auth()
+        true
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.inner.supported_verify_schemes()
+        self.supported_schemes.clone()
     }
 
     fn supported_certificate_types(
         &self,
     ) -> &'static [::rustls::enums::CertificateType] {
-        self.inner.supported_certificate_types()
+        match &self.inner {
+            Some(inner) => inner.supported_certificate_types(),
+
+            None => &[::rustls::enums::CertificateType::X509],
+        }
     }
 }
 
@@ -1493,6 +2152,8 @@ fn observe_ex_data(ex_data: &mut ExData) {
 
 #[cfg(test)]
 mod tests {
+    use ::rustls::server::danger::ClientVerifier as _;
+
     use super::*;
 
     const EXAMPLE_CERT: &str =
@@ -1651,6 +2312,66 @@ mod tests {
         .unwrap()
         .map(|cert| cert.unwrap().as_ref().to_vec())
         .collect()
+    }
+
+    #[test]
+    fn certificate_common_name_matches_dns_name() {
+        let cert = example_cert_chain().remove(0);
+        let server_name =
+            ::rustls::pki_types::ServerName::try_from("quic.tech").unwrap();
+
+        assert!(common_name_matches_server_name(&cert, &server_name));
+    }
+
+    #[test]
+    fn legacy_v1_example_cert_verifies_against_root() {
+        let mut ctx = Context::new().unwrap();
+        ctx.load_verify_locations_from_file(EXAMPLE_ROOT).unwrap();
+
+        let cert = example_cert_chain().remove(0);
+        let legacy = legacy_v1_certificate(&cert).unwrap();
+        let now = ::rustls::pki_types::UnixTime::since_unix_epoch(
+            Duration::from_secs(1_800_000_000),
+        );
+
+        assert!(valid_at(&legacy, now));
+        assert!(legacy_sha256_rsa_signature_algorithm(
+            legacy.signature_algorithm
+        ));
+        assert!(ctx.root_store.roots.iter().any(|root| {
+            let public_key = der_sequence(root.subject_public_key_info.as_ref());
+            signature::UnparsedPublicKey::new(
+                &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
+                public_key,
+            )
+            .verify(legacy.tbs, legacy.signature)
+            .is_ok()
+        }));
+
+        let identity =
+            Identity::from_cert_chain(vec![CertificateDer::from(cert)]).unwrap();
+        let server_name =
+            ::rustls::pki_types::ServerName::try_from("quic.tech").unwrap();
+
+        assert!(legacy_v1_server_identity_valid(
+            &ctx.root_store,
+            &identity,
+            &server_name,
+            now
+        ));
+    }
+
+    #[test]
+    fn empty_root_client_verifier_requests_optional_auth() {
+        let verifier = RecordingClientVerifier::without_roots(
+            &rustls_aws_lc_rs::DEFAULT_TLS13_PROVIDER,
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+        );
+
+        assert!(verifier.offer_client_auth());
+        assert!(!verifier.client_auth_mandatory());
+        assert!(verifier.root_hint_subjects().is_empty());
     }
 
     fn server_context_with_ticket_key() -> Context {
