@@ -300,7 +300,11 @@ impl Handshake {
     }
 
     pub fn is_resumed(&self) -> bool {
-        false
+        matches!(
+            self.conn.as_ref().and_then(|conn| conn.handshake_kind()),
+            Some(::rustls::HandshakeKind::Resumed) |
+                Some(::rustls::HandshakeKind::ResumedWithHelloRetryRequest)
+        )
     }
 
     pub fn clear(&mut self) -> Result<()> {
@@ -1008,6 +1012,7 @@ mod tests {
         assert!(client_crypto_ctx[packet::Epoch::Handshake].has_keys());
         assert!(client_crypto_ctx[packet::Epoch::Application].has_keys());
         assert_eq!(client.cipher(), Some(crypto::Algorithm::AES128_GCM));
+        assert!(!client.is_resumed());
 
         let expected_chain = example_cert_chain();
         assert_eq!(client.peer_cert(), Some(expected_chain[0].as_slice()));
