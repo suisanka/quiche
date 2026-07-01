@@ -24,8 +24,10 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::fmt;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use ::rustls::crypto::CipherSuite;
 use ::rustls::crypto::Credentials;
@@ -49,6 +51,7 @@ pub struct Context {
     private_key: Option<PrivateKeyDer<'static>>,
     root_store: RootCertStore,
     verify: bool,
+    keylog_enabled: bool,
     alpn_protocols: Vec<Vec<u8>>,
 }
 
@@ -62,17 +65,21 @@ impl Context {
             private_key: None,
             root_store: RootCertStore::empty(),
             verify: true,
+            keylog_enabled: false,
             alpn_protocols: Vec::new(),
         })
     }
 
     pub fn new_handshake(&mut self) -> Result<Handshake> {
+        let key_log = self.keylog_enabled.then(|| Arc::new(QuicheKeyLog::new()));
+
         Ok(Handshake {
             provider: Arc::clone(&self.provider),
             certificate_identity: self.certificate_identity.clone(),
             private_key: self.private_key.as_ref().map(PrivateKeyDer::clone_key),
             root_store: self.root_store.clone(),
             verify: self.verify,
+            key_log,
             alpn_protocols: self.alpn_protocols.clone(),
             is_server: None,
             server_name: None,
@@ -125,7 +132,9 @@ impl Context {
         self.verify = verify;
     }
 
-    pub fn enable_keylog(&mut self) {}
+    pub fn enable_keylog(&mut self) {
+        self.keylog_enabled = true;
+    }
 
     pub fn set_alpn(&mut self, v: &[&[u8]]) -> Result<()> {
         self.alpn_protocols = v.iter().map(|proto| proto.to_vec()).collect();
@@ -146,6 +155,7 @@ pub struct Handshake {
     private_key: Option<PrivateKeyDer<'static>>,
     root_store: RootCertStore,
     verify: bool,
+    key_log: Option<Arc<QuicheKeyLog>>,
     alpn_protocols: Vec<Vec<u8>>,
     is_server: Option<bool>,
     server_name: Option<String>,
@@ -217,6 +227,7 @@ impl Handshake {
         observe_ex_data(ex_data);
         self.sync_ex_data(ex_data);
         self.flush_handshake_data(ex_data)?;
+        self.flush_keylog(ex_data);
 
         match self.is_completed() {
             true => Ok(()),
@@ -224,9 +235,9 @@ impl Handshake {
         }
     }
 
-    pub fn process_post_handshake(
-        &mut self, _ex_data: &mut ExData,
-    ) -> Result<()> {
+    pub fn process_post_handshake(&mut self, ex_data: &mut ExData) -> Result<()> {
+        self.flush_keylog(ex_data);
+
         Ok(())
     }
 
@@ -343,6 +354,7 @@ impl Handshake {
             .cloned()
             .map(::rustls::enums::ApplicationProtocol::from)
             .collect();
+        self.set_keylog(&mut config.key_log);
 
         let conn = ::rustls::quic::ClientConnection::new(
             Arc::new(config),
@@ -385,6 +397,7 @@ impl Handshake {
             .cloned()
             .map(::rustls::enums::ApplicationProtocol::from)
             .collect();
+        self.set_keylog(&mut config.key_log);
 
         let conn = ::rustls::quic::ServerConnection::new(
             Arc::new(config),
@@ -394,6 +407,18 @@ impl Handshake {
         .map_err(|_| Error::TlsFail)?;
 
         Ok(conn.into())
+    }
+
+    fn set_keylog(&self, key_log: &mut Arc<dyn ::rustls::KeyLog>) {
+        if let Some(log) = &self.key_log {
+            *key_log = log.clone();
+        }
+    }
+
+    fn flush_keylog(&self, ex_data: &mut ExData) {
+        if let Some(key_log) = &self.key_log {
+            key_log.drain(&mut ex_data.keylog);
+        }
     }
 
     fn sync_ex_data(&mut self, ex_data: &ExData) {
@@ -520,6 +545,63 @@ fn peer_cert<'a>(identity: &'a Identity<'static>) -> Option<&'a [u8]> {
     }
 }
 
+struct QuicheKeyLog {
+    lines: Mutex<Vec<u8>>,
+}
+
+impl QuicheKeyLog {
+    fn new() -> QuicheKeyLog {
+        QuicheKeyLog {
+            lines: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn drain(&self, keylog: &mut Option<&mut Box<dyn Write + Send + Sync>>) {
+        let data = match self.lines.lock() {
+            Ok(mut lines) => std::mem::take(&mut *lines),
+
+            Err(_) => return,
+        };
+
+        if data.is_empty() {
+            return;
+        }
+
+        if let Some(keylog) = keylog {
+            keylog.write_all(&data).ok();
+            keylog.flush().ok();
+        }
+    }
+}
+
+impl fmt::Debug for QuicheKeyLog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuicheKeyLog").finish_non_exhaustive()
+    }
+}
+
+impl ::rustls::KeyLog for QuicheKeyLog {
+    fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+        let Ok(mut lines) = self.lines.lock() else {
+            return;
+        };
+
+        write!(lines, "{label} ").ok();
+
+        for b in client_random {
+            write!(lines, "{b:02x}").ok();
+        }
+
+        write!(lines, " ").ok();
+
+        for b in secret {
+            write!(lines, "{b:02x}").ok();
+        }
+
+        writeln!(lines).ok();
+    }
+}
+
 #[derive(Debug)]
 struct NoCertificateVerification {
     supported_schemes: Vec<::rustls::crypto::SignatureScheme>,
@@ -620,9 +702,19 @@ mod tests {
     use super::*;
 
     fn handshake(is_server: bool) -> (Handshake, [packet::CryptoContext; 3]) {
+        handshake_with_keylog(is_server, false)
+    }
+
+    fn handshake_with_keylog(
+        is_server: bool, keylog_enabled: bool,
+    ) -> (Handshake, [packet::CryptoContext; 3]) {
         let mut ctx = Context::new().unwrap();
         ctx.set_verify(false);
         ctx.set_alpn(&[b"h3"]).unwrap();
+
+        if keylog_enabled {
+            ctx.enable_keylog();
+        }
 
         if is_server {
             ctx.use_certificate_chain_file(concat!(
@@ -664,12 +756,31 @@ mod tests {
         local_error: &'a mut Option<ConnectionError>,
         recovery_config: crate::recovery::RecoveryConfig, tx_cap_factor: f64,
     ) -> ExData<'a> {
+        ex_data_with_keylog(
+            crypto_ctx,
+            is_server,
+            application_protos,
+            session,
+            local_error,
+            recovery_config,
+            tx_cap_factor,
+            None,
+        )
+    }
+
+    fn ex_data_with_keylog<'a>(
+        crypto_ctx: &'a mut [packet::CryptoContext; 3], is_server: bool,
+        application_protos: &'a Vec<Vec<u8>>, session: &'a mut Option<Vec<u8>>,
+        local_error: &'a mut Option<ConnectionError>,
+        recovery_config: crate::recovery::RecoveryConfig, tx_cap_factor: f64,
+        keylog: Option<&'a mut Box<dyn Write + Send + Sync>>,
+    ) -> ExData<'a> {
         ExData {
             application_protos,
             crypto_ctx,
             session,
             local_error,
-            keylog: None,
+            keylog,
             trace_id: "",
             local_transport_params: crate::TransportParams::default(),
             recovery_config,
@@ -677,6 +788,29 @@ mod tests {
             pmtud: None,
             is_server,
         }
+    }
+
+    #[derive(Clone)]
+    struct SharedKeyLog {
+        data: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedKeyLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.data.lock().unwrap().extend_from_slice(buf);
+
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn keylog_writer() -> (Arc<Mutex<Vec<u8>>>, Box<dyn Write + Send + Sync>) {
+        let data = Arc::new(Mutex::new(Vec::new()));
+
+        (data.clone(), Box::new(SharedKeyLog { data }))
     }
 
     fn drain_crypto(
@@ -846,6 +980,106 @@ mod tests {
         );
         assert!(server.peer_cert().is_none());
         assert!(server.peer_cert_chain().is_none());
+    }
+
+    #[test]
+    fn handshake_writes_keylog() {
+        let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery_config =
+            crate::recovery::RecoveryConfig::from_config(&config);
+        let application_protos = vec![b"h3".to_vec()];
+        let mut client_session = None;
+        let mut server_session = None;
+        let mut client_error = None;
+        let mut server_error = None;
+        let (client_log, mut client_keylog) = keylog_writer();
+        let (server_log, mut server_keylog) = keylog_writer();
+
+        let (mut client, mut client_crypto_ctx) =
+            handshake_with_keylog(false, true);
+        let (mut server, mut server_crypto_ctx) =
+            handshake_with_keylog(true, true);
+
+        {
+            let mut client_ex_data = ex_data_with_keylog(
+                &mut client_crypto_ctx,
+                false,
+                &application_protos,
+                &mut client_session,
+                &mut client_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+                Some(&mut client_keylog),
+            );
+            assert!(matches!(
+                client.do_handshake(&mut client_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+        }
+
+        let client_initial =
+            drain_crypto(&mut client_crypto_ctx, packet::Epoch::Initial);
+        server
+            .provide_data(crypto::Level::Initial, &client_initial)
+            .unwrap();
+
+        {
+            let mut server_ex_data = ex_data_with_keylog(
+                &mut server_crypto_ctx,
+                true,
+                &application_protos,
+                &mut server_session,
+                &mut server_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+                Some(&mut server_keylog),
+            );
+            assert_eq!(
+                server.do_handshake(&mut server_ex_data),
+                Err(Error::Done)
+            );
+        }
+
+        let server_initial =
+            drain_crypto(&mut server_crypto_ctx, packet::Epoch::Initial);
+        let server_handshake =
+            drain_crypto(&mut server_crypto_ctx, packet::Epoch::Handshake);
+
+        client
+            .provide_data(crypto::Level::Initial, &server_initial)
+            .unwrap();
+        client
+            .provide_data(crypto::Level::Handshake, &server_handshake)
+            .unwrap();
+
+        {
+            let mut client_ex_data = ex_data_with_keylog(
+                &mut client_crypto_ctx,
+                false,
+                &application_protos,
+                &mut client_session,
+                &mut client_error,
+                recovery_config,
+                config.tx_cap_factor,
+                Some(&mut client_keylog),
+            );
+            assert!(matches!(
+                client.do_handshake(&mut client_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+        }
+
+        let client_log =
+            String::from_utf8(client_log.lock().unwrap().clone()).unwrap();
+        let server_log =
+            String::from_utf8(server_log.lock().unwrap().clone()).unwrap();
+
+        assert!(client_log.contains("CLIENT_HANDSHAKE_TRAFFIC_SECRET "));
+        assert!(client_log.contains("SERVER_HANDSHAKE_TRAFFIC_SECRET "));
+        assert!(client_log.contains("CLIENT_TRAFFIC_SECRET_0 "));
+        assert!(client_log.contains("SERVER_TRAFFIC_SECRET_0 "));
+        assert!(server_log.contains("CLIENT_HANDSHAKE_TRAFFIC_SECRET "));
+        assert!(server_log.contains("SERVER_HANDSHAKE_TRAFFIC_SECRET "));
     }
 
     #[test]
