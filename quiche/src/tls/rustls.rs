@@ -30,16 +30,26 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use ::rustls::crypto::CipherSuite;
 use ::rustls::crypto::Credentials;
 use ::rustls::crypto::Identity;
 use ::rustls::crypto::SingleCredential;
+use ::rustls::crypto::TicketProducer;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
 use ::rustls::RootCertStore;
 use ::rustls::SupportedCipherSuite;
+use aws_lc_rs::cipher::DecryptionContext;
+use aws_lc_rs::cipher::PaddedBlockDecryptingKey;
+use aws_lc_rs::cipher::PaddedBlockEncryptingKey;
+use aws_lc_rs::cipher::UnboundCipherKey;
+use aws_lc_rs::cipher::AES_128;
+use aws_lc_rs::cipher::AES_CBC_IV_LEN;
+use aws_lc_rs::hmac;
+use aws_lc_rs::iv;
 
 use crate::crypto;
 use crate::packet;
@@ -55,6 +65,7 @@ pub struct Context {
     verify: bool,
     keylog_enabled: bool,
     early_data_enabled: bool,
+    ticket_producer: Option<Arc<dyn TicketProducer>>,
     alpn_protocols: Vec<Vec<u8>>,
 }
 
@@ -70,6 +81,7 @@ impl Context {
             verify: false,
             keylog_enabled: false,
             early_data_enabled: false,
+            ticket_producer: None,
             alpn_protocols: Vec::new(),
         })
     }
@@ -85,6 +97,7 @@ impl Context {
             verify: self.verify,
             key_log,
             early_data_enabled: self.early_data_enabled,
+            ticket_producer: self.ticket_producer.clone(),
             alpn_protocols: self.alpn_protocols.clone(),
             is_server: None,
             server_name: None,
@@ -156,8 +169,10 @@ impl Context {
         Ok(())
     }
 
-    pub fn set_ticket_key(&mut self, _key: &[u8]) -> Result<()> {
-        Err(Error::TlsFail)
+    pub fn set_ticket_key(&mut self, key: &[u8]) -> Result<()> {
+        self.ticket_producer = Some(Arc::new(QuicheTicketProducer::new(key)?));
+
+        Ok(())
     }
 
     pub fn set_early_data_enabled(&mut self, enabled: bool) {
@@ -188,6 +203,7 @@ pub struct Handshake {
     verify: bool,
     key_log: Option<Arc<QuicheKeyLog>>,
     early_data_enabled: bool,
+    ticket_producer: Option<Arc<dyn TicketProducer>>,
     alpn_protocols: Vec<Vec<u8>>,
     is_server: Option<bool>,
     server_name: Option<String>,
@@ -473,12 +489,16 @@ impl Handshake {
             true => u32::MAX,
             false => 0,
         };
-        config.ticketer = Some(
-            self.provider
-                .ticketer_factory
-                .ticketer()
-                .map_err(|_| Error::TlsFail)?,
-        );
+        config.ticketer = match &self.ticket_producer {
+            Some(ticket_producer) => Some(ticket_producer.clone()),
+
+            None => Some(
+                self.provider
+                    .ticketer_factory
+                    .ticketer()
+                    .map_err(|_| Error::TlsFail)?,
+            ),
+        };
         self.set_keylog(&mut config.key_log);
 
         Ok(config)
@@ -705,6 +725,134 @@ impl ::rustls::KeyLog for QuicheKeyLog {
         }
 
         writeln!(lines).ok();
+    }
+}
+
+const TICKET_KEY_LEN: usize = 48;
+const TICKET_KEY_NAME_LEN: usize = 16;
+const TICKET_HMAC_KEY_LEN: usize = 16;
+const TICKET_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_TICKET_CIPHERTEXT_LEN: usize = u16::MAX as usize;
+
+struct QuicheTicketProducer {
+    key_name: [u8; TICKET_KEY_NAME_LEN],
+    hmac_key: hmac::Key,
+    aes_encrypt_key: PaddedBlockEncryptingKey,
+    aes_decrypt_key: PaddedBlockDecryptingKey,
+}
+
+impl QuicheTicketProducer {
+    fn new(key: &[u8]) -> Result<Self> {
+        if key.len() != TICKET_KEY_LEN {
+            return Err(Error::TlsFail);
+        }
+
+        let mut key_name = [0; TICKET_KEY_NAME_LEN];
+        key_name.copy_from_slice(&key[..TICKET_KEY_NAME_LEN]);
+        let hmac_key = hmac::Key::new(
+            hmac::HMAC_SHA256,
+            &key[TICKET_KEY_NAME_LEN..TICKET_KEY_NAME_LEN + TICKET_HMAC_KEY_LEN],
+        );
+        let aes_key = &key[TICKET_KEY_NAME_LEN + TICKET_HMAC_KEY_LEN..];
+
+        let aes_encrypt_key = UnboundCipherKey::new(&AES_128, aes_key)
+            .map_err(|_| Error::TlsFail)?;
+        let aes_encrypt_key =
+            PaddedBlockEncryptingKey::cbc_pkcs7(aes_encrypt_key)
+                .map_err(|_| Error::TlsFail)?;
+        let aes_decrypt_key = UnboundCipherKey::new(&AES_128, aes_key)
+            .map_err(|_| Error::TlsFail)?;
+        let aes_decrypt_key =
+            PaddedBlockDecryptingKey::cbc_pkcs7(aes_decrypt_key)
+                .map_err(|_| Error::TlsFail)?;
+
+        Ok(Self {
+            key_name,
+            hmac_key,
+            aes_encrypt_key,
+            aes_decrypt_key,
+        })
+    }
+}
+
+impl TicketProducer for QuicheTicketProducer {
+    fn encrypt(&self, message: &[u8]) -> Option<Vec<u8>> {
+        let mut encrypted_state = Vec::from(message);
+        let dec_ctx = self.aes_encrypt_key.encrypt(&mut encrypted_state).ok()?;
+        let iv: &[u8] = (&dec_ctx).try_into().ok()?;
+
+        let mut hmac_data = Vec::with_capacity(
+            self.key_name.len() + iv.len() + 2 + encrypted_state.len(),
+        );
+        hmac_data.extend_from_slice(&self.key_name);
+        hmac_data.extend_from_slice(iv);
+        hmac_data.extend_from_slice(
+            &u16::try_from(encrypted_state.len()).ok()?.to_be_bytes(),
+        );
+        hmac_data.extend_from_slice(&encrypted_state);
+        let tag = hmac::sign(&self.hmac_key, &hmac_data);
+
+        let mut ciphertext = Vec::with_capacity(
+            self.key_name.len() +
+                iv.len() +
+                encrypted_state.len() +
+                tag.as_ref().len(),
+        );
+        ciphertext.extend_from_slice(&self.key_name);
+        ciphertext.extend_from_slice(iv);
+        ciphertext.extend_from_slice(&encrypted_state);
+        ciphertext.extend_from_slice(tag.as_ref());
+
+        Some(ciphertext)
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
+        if ciphertext.len() > MAX_TICKET_CIPHERTEXT_LEN {
+            return None;
+        }
+
+        let (key_name, ciphertext) =
+            ciphertext.split_at_checked(TICKET_KEY_NAME_LEN)?;
+        if key_name != self.key_name {
+            return None;
+        }
+
+        let (iv, ciphertext) = ciphertext.split_at_checked(AES_CBC_IV_LEN)?;
+        let tag_len = self.hmac_key.algorithm().digest_algorithm().output_len();
+        let encrypted_len = ciphertext.len().checked_sub(tag_len)?;
+        let (encrypted_state, tag) =
+            ciphertext.split_at_checked(encrypted_len)?;
+
+        let mut hmac_data = Vec::with_capacity(
+            key_name.len() + iv.len() + 2 + encrypted_state.len(),
+        );
+        hmac_data.extend_from_slice(key_name);
+        hmac_data.extend_from_slice(iv);
+        hmac_data.extend_from_slice(
+            &u16::try_from(encrypted_state.len()).ok()?.to_be_bytes(),
+        );
+        hmac_data.extend_from_slice(encrypted_state);
+        hmac::verify(&self.hmac_key, &hmac_data, tag).ok()?;
+
+        let iv = iv::FixedLength::try_from(iv).ok()?;
+        let mut out = Vec::from(encrypted_state);
+        let plaintext = self
+            .aes_decrypt_key
+            .decrypt(&mut out, DecryptionContext::Iv128(iv))
+            .ok()?;
+
+        Some(plaintext.into())
+    }
+
+    fn lifetime(&self) -> Duration {
+        TICKET_LIFETIME
+    }
+}
+
+impl fmt::Debug for QuicheTicketProducer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuicheTicketProducer")
+            .finish_non_exhaustive()
     }
 }
 
@@ -1163,6 +1311,43 @@ mod tests {
         let config = server.build_server_config().unwrap();
 
         assert!(config.ticketer.is_some());
+    }
+
+    #[test]
+    fn set_ticket_key_rejects_invalid_lengths() {
+        let mut ctx = Context::new().unwrap();
+
+        assert_eq!(
+            ctx.set_ticket_key(&[0; TICKET_KEY_LEN - 1]),
+            Err(Error::TlsFail)
+        );
+        assert_eq!(
+            ctx.set_ticket_key(&[0; TICKET_KEY_LEN + 1]),
+            Err(Error::TlsFail)
+        );
+    }
+
+    #[test]
+    fn set_ticket_key_configures_fixed_ticket_producer() {
+        let mut server_ctx = Context::new().unwrap();
+        server_ctx.set_verify(false);
+        server_ctx.set_alpn(&[b"h3"]).unwrap();
+        server_ctx.use_certificate_chain_file(EXAMPLE_CERT).unwrap();
+        server_ctx.use_privkey_file(EXAMPLE_KEY).unwrap();
+        server_ctx.set_ticket_key(&[0x0a; TICKET_KEY_LEN]).unwrap();
+
+        let (server, _server_crypto_ctx) =
+            handshake_from_context(server_ctx, true);
+        let config = server.build_server_config().unwrap();
+        let ticketer = config.ticketer.as_ref().unwrap();
+        let ticket_state = b"ticket state";
+
+        let ciphertext = ticketer.encrypt(ticket_state).unwrap();
+        assert_eq!(ticketer.decrypt(&ciphertext).unwrap(), ticket_state);
+
+        let mut wrong_key_name = ciphertext;
+        wrong_key_name[0] ^= 0x01;
+        assert!(ticketer.decrypt(&wrong_key_name).is_none());
     }
 
     #[test]
