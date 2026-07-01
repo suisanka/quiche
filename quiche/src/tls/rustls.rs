@@ -54,6 +54,7 @@ pub struct Context {
     root_store: RootCertStore,
     verify: bool,
     keylog_enabled: bool,
+    early_data_enabled: bool,
     alpn_protocols: Vec<Vec<u8>>,
 }
 
@@ -68,6 +69,7 @@ impl Context {
             root_store: RootCertStore::empty(),
             verify: true,
             keylog_enabled: false,
+            early_data_enabled: false,
             alpn_protocols: Vec::new(),
         })
     }
@@ -82,6 +84,7 @@ impl Context {
             root_store: self.root_store.clone(),
             verify: self.verify,
             key_log,
+            early_data_enabled: self.early_data_enabled,
             alpn_protocols: self.alpn_protocols.clone(),
             is_server: None,
             server_name: None,
@@ -157,7 +160,9 @@ impl Context {
         Err(Error::TlsFail)
     }
 
-    pub fn set_early_data_enabled(&mut self, _enabled: bool) {}
+    pub fn set_early_data_enabled(&mut self, enabled: bool) {
+        self.early_data_enabled = enabled;
+    }
 
     fn load_root_certs_from_file(
         &mut self, file: impl AsRef<Path>,
@@ -182,6 +187,7 @@ pub struct Handshake {
     root_store: RootCertStore,
     verify: bool,
     key_log: Option<Arc<QuicheKeyLog>>,
+    early_data_enabled: bool,
     alpn_protocols: Vec<Vec<u8>>,
     is_server: Option<bool>,
     server_name: Option<String>,
@@ -380,6 +386,7 @@ impl Handshake {
             .cloned()
             .map(::rustls::enums::ApplicationProtocol::from)
             .collect();
+        config.enable_early_data = self.early_data_enabled;
         self.set_keylog(&mut config.key_log);
 
         let conn = ::rustls::quic::ClientConnection::new(
@@ -423,6 +430,10 @@ impl Handshake {
             .cloned()
             .map(::rustls::enums::ApplicationProtocol::from)
             .collect();
+        config.max_early_data_size = match self.early_data_enabled {
+            true => u32::MAX,
+            false => 0,
+        };
         self.set_keylog(&mut config.key_log);
 
         let conn = ::rustls::quic::ServerConnection::new(
@@ -1178,6 +1189,56 @@ mod tests {
             .unwrap();
 
         assert!(handshake.build_client_connection().is_ok());
+    }
+
+    #[test]
+    fn context_copies_early_data_setting_to_handshake() {
+        let mut ctx = Context::new().unwrap();
+        let handshake = ctx.new_handshake().unwrap();
+        assert!(!handshake.early_data_enabled);
+
+        ctx.set_early_data_enabled(true);
+        let handshake = ctx.new_handshake().unwrap();
+        assert!(handshake.early_data_enabled);
+    }
+
+    #[test]
+    fn early_data_enabled_connections_build() {
+        let mut client_ctx = Context::new().unwrap();
+        client_ctx.set_verify(false);
+        client_ctx.set_alpn(&[b"h3"]).unwrap();
+        client_ctx.set_early_data_enabled(true);
+
+        let mut client = client_ctx.new_handshake().unwrap();
+        client.init(false).unwrap();
+        client.set_host_name("example.com").unwrap();
+        client
+            .set_quic_transport_params(&crate::TransportParams::default(), false)
+            .unwrap();
+        assert!(client.build_client_connection().is_ok());
+
+        let mut server_ctx = Context::new().unwrap();
+        server_ctx.set_alpn(&[b"h3"]).unwrap();
+        server_ctx.set_early_data_enabled(true);
+        server_ctx
+            .use_certificate_chain_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/cert.crt"
+            ))
+            .unwrap();
+        server_ctx
+            .use_privkey_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/cert.key"
+            ))
+            .unwrap();
+
+        let mut server = server_ctx.new_handshake().unwrap();
+        server.init(true).unwrap();
+        server
+            .set_quic_transport_params(&crate::TransportParams::default(), true)
+            .unwrap();
+        assert!(server.build_server_connection().is_ok());
     }
 
     #[test]
