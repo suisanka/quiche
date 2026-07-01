@@ -1339,6 +1339,9 @@ where
     /// Peer's transport parameters.
     peer_transport_params: TransportParams,
 
+    /// Peer's transport parameters remembered from a cached TLS session.
+    session_transport_params: Option<Vec<u8>>,
+
     /// If tracking unknown transport parameters from a peer, how much space to
     /// use in bytes.
     peer_transport_params_track_unknown: Option<usize>,
@@ -2071,6 +2074,8 @@ impl<F: BufFactory> Connection<F> {
 
             peer_transport_params: TransportParams::default(),
 
+            session_transport_params: None,
+
             peer_transport_params_track_unknown: config
                 .track_unknown_transport_params,
 
@@ -2409,6 +2414,8 @@ impl<F: BufFactory> Connection<F> {
 
         let raw_params_len = b.get_u64()? as usize;
         let raw_params_bytes = b.get_bytes(raw_params_len)?;
+
+        self.session_transport_params = Some(raw_params_bytes.as_ref().to_vec());
 
         let peer_params = TransportParams::decode(
             raw_params_bytes.as_ref(),
@@ -7981,6 +7988,12 @@ impl<F: BufFactory> Connection<F> {
         Ok(())
     }
 
+    fn is_session_transport_params(&self, raw_params: &[u8]) -> bool {
+        self.session_transport_params
+            .as_deref()
+            .is_some_and(|session_params| session_params == raw_params)
+    }
+
     /// Continues the handshake.
     ///
     /// If the connection is already established, it does nothing.
@@ -8066,7 +8079,10 @@ impl<F: BufFactory> Connection<F> {
                 // in 0.5 RTT.
                 let raw_params = self.handshake.quic_transport_params();
 
-                if !self.parsed_peer_transport_params && !raw_params.is_empty() {
+                if !self.parsed_peer_transport_params &&
+                    !raw_params.is_empty() &&
+                    !self.is_session_transport_params(raw_params)
+                {
                     let peer_params = TransportParams::decode(
                         raw_params,
                         self.is_server,
