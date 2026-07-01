@@ -31,7 +31,12 @@ default = ["boringssl-boring-crate"]
 boringssl-boring-crate = ["boring", "foreign-types-shared"]
 
 # Use rustls with the aws-lc-rs crypto provider.
-rustls-aws-lc-rs = ["dep:rustls", "dep:rustls-aws-lc-rs", "rustls/webpki"]
+rustls-aws-lc-rs = [
+  "dep:aws-lc-rs",
+  "dep:rustls",
+  "dep:rustls-aws-lc-rs",
+  "rustls/webpki",
+]
 
 # Allow client connections to provide a custom DCID when initiating a
 # connection. Be aware that RFC 9000 places requirements for unpredictability and
@@ -72,6 +77,7 @@ cdylib-link-lines = { version = "0.1", optional = true }
 [dependencies]
 bytes = { workspace = true }
 boring = { workspace = true, optional = true }
+aws-lc-rs = { workspace = true, optional = true }
 debug_panic = { workspace = true }
 either = { version = "1.8", default-features = false }
 foreign-types-shared = { version = "0.3.0", optional = true }

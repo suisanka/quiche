@@ -26,7 +26,21 @@ pub(crate) struct AES_KEY {
     rounds: c_int,
 }
 
+#[allow(non_camel_case_types)]
+#[repr(transparent)]
+struct EVP_MD {
+    _unused: c_void,
+}
+
 impl Algorithm {
+    fn get_evp_digest(self) -> *const EVP_MD {
+        match self {
+            Algorithm::AES128_GCM => unsafe { EVP_sha256() },
+            Algorithm::AES256_GCM => unsafe { EVP_sha384() },
+            Algorithm::ChaCha20_Poly1305 => unsafe { EVP_sha256() },
+        }
+    }
+
     fn get_evp_aead(self) -> *const EVP_AEAD {
         match self {
             Algorithm::AES128_GCM => unsafe { EVP_aead_aes_128_gcm_tls13() },
@@ -319,7 +333,28 @@ pub(crate) fn hkdf_expand(
     Ok(())
 }
 
+pub(crate) fn backend_verify_slices_are_equal(a: &[u8], b: &[u8]) -> Result<()> {
+    if a.len() != b.len() {
+        return Err(Error::CryptoFail);
+    }
+
+    let rc = unsafe { CRYPTO_memcmp(a.as_ptr(), b.as_ptr(), a.len()) };
+
+    if rc == 0 {
+        return Ok(());
+    }
+
+    Err(Error::CryptoFail)
+}
+
 extern "C" {
+    fn EVP_sha256() -> *const EVP_MD;
+
+    fn EVP_sha384() -> *const EVP_MD;
+
+    // CRYPTO
+    fn CRYPTO_memcmp(a: *const u8, b: *const u8, len: usize) -> c_int;
+
     fn EVP_aead_aes_128_gcm_tls13() -> *const EVP_AEAD;
 
     fn EVP_aead_aes_256_gcm_tls13() -> *const EVP_AEAD;

@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use libc::c_int;
+#[cfg(feature = "boringssl-boring-crate")]
 use libc::c_void;
 
 use crate::Error;
@@ -71,17 +71,7 @@ pub enum Algorithm {
     ChaCha20_Poly1305,
 }
 
-// Note: some vendor-specific methods are implemented in the boringssl
-// submodule.
 impl Algorithm {
-    fn get_evp_digest(self) -> *const EVP_MD {
-        match self {
-            Algorithm::AES128_GCM => unsafe { EVP_sha256() },
-            Algorithm::AES256_GCM => unsafe { EVP_sha384() },
-            Algorithm::ChaCha20_Poly1305 => unsafe { EVP_sha256() },
-        }
-    }
-
     pub const fn key_len(self) -> usize {
         match self {
             Algorithm::AES128_GCM => 16,
@@ -113,13 +103,8 @@ impl Algorithm {
 
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
+#[cfg(feature = "boringssl-boring-crate")]
 pub struct EVP_AEAD {
-    _unused: c_void,
-}
-
-#[allow(non_camel_case_types)]
-#[repr(transparent)]
-struct EVP_MD {
     _unused: c_void,
 }
 
@@ -506,26 +491,7 @@ fn make_nonce(iv: &[u8], counter: u64) -> [u8; MAX_NONCE_LEN] {
 }
 
 pub fn verify_slices_are_equal(a: &[u8], b: &[u8]) -> Result<()> {
-    if a.len() != b.len() {
-        return Err(Error::CryptoFail);
-    }
-
-    let rc = unsafe { CRYPTO_memcmp(a.as_ptr(), b.as_ptr(), a.len()) };
-
-    if rc == 0 {
-        return Ok(());
-    }
-
-    Err(Error::CryptoFail)
-}
-
-extern "C" {
-    fn EVP_sha256() -> *const EVP_MD;
-
-    fn EVP_sha384() -> *const EVP_MD;
-
-    // CRYPTO
-    fn CRYPTO_memcmp(a: *const u8, b: *const u8, len: usize) -> c_int;
+    backend_verify_slices_are_equal(a, b)
 }
 
 #[cfg(test)]
@@ -667,5 +633,12 @@ mod tests {
     }
 }
 
+#[cfg(feature = "rustls-aws-lc-rs")]
+mod aws_lc;
+#[cfg(feature = "rustls-aws-lc-rs")]
+pub(crate) use aws_lc::*;
+
+#[cfg(feature = "boringssl-boring-crate")]
 mod boringssl;
+#[cfg(feature = "boringssl-boring-crate")]
 pub(crate) use boringssl::*;

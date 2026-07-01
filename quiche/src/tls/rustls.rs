@@ -27,7 +27,9 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use ::rustls::crypto::Credentials;
 use ::rustls::crypto::Identity;
+use ::rustls::crypto::SingleCredential;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
@@ -351,10 +353,19 @@ impl Handshake {
         let private_key =
             self.private_key.as_ref().ok_or(Error::TlsFail)?.clone_key();
 
+        let signing_key = self
+            .provider
+            .key_provider
+            .load_private_key(private_key)
+            .map_err(|_| Error::TlsFail)?;
+        let credentials =
+            Credentials::new_unchecked(certificate_identity, signing_key);
         let mut config =
             ::rustls::ServerConfig::builder(Arc::clone(&self.provider))
                 .with_no_client_auth()
-                .with_single_cert(certificate_identity, private_key)
+                .with_server_credential_resolver(Arc::new(
+                    SingleCredential::from(credentials),
+                ))
                 .map_err(|_| Error::TlsFail)?;
 
         config.alpn_protocols = self
