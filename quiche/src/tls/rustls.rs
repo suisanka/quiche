@@ -316,7 +316,10 @@ impl Handshake {
     }
 
     pub fn curve(&self) -> Option<String> {
-        None
+        self.conn
+            .as_ref()?
+            .negotiated_key_exchange_group()
+            .map(|group| format!("{:?}", group.name()))
     }
 
     pub fn sigalg(&self) -> Option<String> {
@@ -1012,6 +1015,7 @@ mod tests {
         assert!(client_crypto_ctx[packet::Epoch::Handshake].has_keys());
         assert!(client_crypto_ctx[packet::Epoch::Application].has_keys());
         assert_eq!(client.cipher(), Some(crypto::Algorithm::AES128_GCM));
+        assert!(client.curve().is_some());
         assert!(!client.is_resumed());
 
         let expected_chain = example_cert_chain();
