@@ -35,11 +35,13 @@ use std::time::Duration;
 use ::rustls::crypto::CipherSuite;
 use ::rustls::crypto::Credentials;
 use ::rustls::crypto::Identity;
+use ::rustls::crypto::SignatureScheme;
 use ::rustls::crypto::SingleCredential;
 use ::rustls::crypto::TicketProducer;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
+use ::rustls::DistinguishedName;
 use ::rustls::RootCertStore;
 use ::rustls::SupportedCipherSuite;
 use aws_lc_rs::cipher::DecryptionContext;
@@ -105,6 +107,7 @@ impl Context {
             conn: None,
             write_level: crypto::Level::Initial,
             early_data_active: false,
+            signature_scheme: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -212,6 +215,7 @@ pub struct Handshake {
     conn: Option<::rustls::quic::Connection>,
     write_level: crypto::Level,
     early_data_active: bool,
+    signature_scheme: Arc<Mutex<Option<SignatureScheme>>>,
 }
 
 impl Handshake {
@@ -329,6 +333,9 @@ impl Handshake {
         self.conn = None;
         self.write_level = crypto::Level::Initial;
         self.early_data_active = false;
+        if let Ok(mut scheme) = self.signature_scheme.lock() {
+            *scheme = None;
+        }
 
         Ok(())
     }
@@ -345,7 +352,9 @@ impl Handshake {
     }
 
     pub fn sigalg(&self) -> Option<String> {
-        None
+        let scheme = self.signature_scheme.lock().ok()?.as_ref().copied()?;
+
+        Some(format!("{scheme:?}"))
     }
 
     pub fn peer_cert_chain(&self) -> Option<Vec<&[u8]>> {
@@ -394,14 +403,30 @@ impl Handshake {
                     return Err(Error::TlsFail);
                 }
 
+                let verifier = ::rustls::client::WebPkiServerVerifier::builder(
+                    Arc::new(self.root_store.clone()),
+                    &self.provider,
+                )
+                .build()
+                .map_err(|_| Error::TlsFail)?;
+
                 ::rustls::ClientConfig::builder(Arc::clone(&self.provider))
-                    .with_root_certificates(Arc::new(self.root_store.clone()))
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(
+                        RecordingServerVerifier::new(
+                            Arc::new(verifier),
+                            self.signature_scheme.clone(),
+                        ),
+                    ))
             },
 
             false => ::rustls::ClientConfig::builder(Arc::clone(&self.provider))
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(
-                    NoCertificateVerification::new(&self.provider),
+                    NoCertificateVerification::new(
+                        &self.provider,
+                        self.signature_scheme.clone(),
+                    ),
                 )),
         };
         let mut config = self.finish_client_config(config_builder)?;
@@ -471,7 +496,12 @@ impl Handshake {
                 .build()
                 .map_err(|_| Error::TlsFail)?;
 
-                config_builder.with_client_cert_verifier(Arc::new(verifier))
+                config_builder.with_client_cert_verifier(Arc::new(
+                    RecordingClientVerifier::new(
+                        Arc::new(verifier),
+                        self.signature_scheme.clone(),
+                    ),
+                ))
             },
 
             false => config_builder.with_no_client_auth(),
@@ -887,17 +917,191 @@ impl fmt::Debug for QuicheTicketProducer {
     }
 }
 
+type RecordedSignatureScheme = Arc<Mutex<Option<SignatureScheme>>>;
+
+fn record_signature_scheme(
+    signature_scheme: &RecordedSignatureScheme,
+    input: &::rustls::client::danger::SignatureVerificationInput,
+) {
+    if let Ok(mut scheme) = signature_scheme.lock() {
+        *scheme = Some(input.signature.scheme);
+    }
+}
+
+#[derive(Debug)]
+struct RecordingServerVerifier {
+    inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
+    signature_scheme: RecordedSignatureScheme,
+}
+
+impl RecordingServerVerifier {
+    fn new(
+        inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
+        signature_scheme: RecordedSignatureScheme,
+    ) -> Self {
+        Self {
+            inner,
+            signature_scheme,
+        }
+    }
+}
+
+impl ::rustls::client::danger::ServerVerifier for RecordingServerVerifier {
+    fn verify_identity(
+        &self, identity: &::rustls::client::danger::ServerIdentity,
+    ) -> std::result::Result<
+        ::rustls::client::danger::PeerVerified,
+        ::rustls::Error,
+    > {
+        self.inner.verify_identity(identity)
+    }
+
+    fn verify_tls12_signature(
+        &self, input: &::rustls::client::danger::SignatureVerificationInput,
+    ) -> std::result::Result<
+        ::rustls::client::danger::HandshakeSignatureValid,
+        ::rustls::Error,
+    > {
+        let result = self.inner.verify_tls12_signature(input);
+        if result.is_ok() {
+            record_signature_scheme(&self.signature_scheme, input);
+        }
+
+        result
+    }
+
+    fn verify_tls13_signature(
+        &self, input: &::rustls::client::danger::SignatureVerificationInput,
+    ) -> std::result::Result<
+        ::rustls::client::danger::HandshakeSignatureValid,
+        ::rustls::Error,
+    > {
+        let result = self.inner.verify_tls13_signature(input);
+        if result.is_ok() {
+            record_signature_scheme(&self.signature_scheme, input);
+        }
+
+        result
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+
+    fn request_ocsp_response(&self) -> bool {
+        self.inner.request_ocsp_response()
+    }
+
+    fn supported_certificate_types(
+        &self,
+    ) -> &'static [::rustls::enums::CertificateType] {
+        self.inner.supported_certificate_types()
+    }
+
+    fn root_hint_subjects(&self) -> Option<Arc<[DistinguishedName]>> {
+        self.inner.root_hint_subjects()
+    }
+
+    fn hash_config(&self, h: &mut dyn std::hash::Hasher) {
+        self.inner.hash_config(h);
+    }
+}
+
+#[derive(Debug)]
+struct RecordingClientVerifier {
+    inner: Arc<dyn ::rustls::server::danger::ClientVerifier>,
+    signature_scheme: RecordedSignatureScheme,
+}
+
+impl RecordingClientVerifier {
+    fn new(
+        inner: Arc<dyn ::rustls::server::danger::ClientVerifier>,
+        signature_scheme: RecordedSignatureScheme,
+    ) -> Self {
+        Self {
+            inner,
+            signature_scheme,
+        }
+    }
+}
+
+impl ::rustls::server::danger::ClientVerifier for RecordingClientVerifier {
+    fn verify_identity(
+        &self, identity: &::rustls::server::danger::ClientIdentity,
+    ) -> std::result::Result<
+        ::rustls::server::danger::PeerVerified,
+        ::rustls::Error,
+    > {
+        self.inner.verify_identity(identity)
+    }
+
+    fn verify_tls12_signature(
+        &self, input: &::rustls::server::danger::SignatureVerificationInput,
+    ) -> std::result::Result<
+        ::rustls::client::danger::HandshakeSignatureValid,
+        ::rustls::Error,
+    > {
+        let result = self.inner.verify_tls12_signature(input);
+        if result.is_ok() {
+            record_signature_scheme(&self.signature_scheme, input);
+        }
+
+        result
+    }
+
+    fn verify_tls13_signature(
+        &self, input: &::rustls::server::danger::SignatureVerificationInput,
+    ) -> std::result::Result<
+        ::rustls::client::danger::HandshakeSignatureValid,
+        ::rustls::Error,
+    > {
+        let result = self.inner.verify_tls13_signature(input);
+        if result.is_ok() {
+            record_signature_scheme(&self.signature_scheme, input);
+        }
+
+        result
+    }
+
+    fn root_hint_subjects(&self) -> Arc<[DistinguishedName]> {
+        self.inner.root_hint_subjects()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.inner.client_auth_mandatory()
+    }
+
+    fn offer_client_auth(&self) -> bool {
+        self.inner.offer_client_auth()
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+
+    fn supported_certificate_types(
+        &self,
+    ) -> &'static [::rustls::enums::CertificateType] {
+        self.inner.supported_certificate_types()
+    }
+}
+
 #[derive(Debug)]
 struct NoCertificateVerification {
     supported_schemes: Vec<::rustls::crypto::SignatureScheme>,
+    signature_scheme: RecordedSignatureScheme,
 }
 
 impl NoCertificateVerification {
-    fn new(provider: &::rustls::crypto::CryptoProvider) -> Self {
+    fn new(
+        provider: &::rustls::crypto::CryptoProvider,
+        signature_scheme: RecordedSignatureScheme,
+    ) -> Self {
         Self {
             supported_schemes: provider
                 .signature_verification_algorithms
                 .supported_schemes(),
+            signature_scheme,
         }
     }
 }
@@ -913,20 +1117,24 @@ impl ::rustls::client::danger::ServerVerifier for NoCertificateVerification {
     }
 
     fn verify_tls12_signature(
-        &self, _input: &::rustls::client::danger::SignatureVerificationInput,
+        &self, input: &::rustls::client::danger::SignatureVerificationInput,
     ) -> std::result::Result<
         ::rustls::client::danger::HandshakeSignatureValid,
         ::rustls::Error,
     > {
+        record_signature_scheme(&self.signature_scheme, input);
+
         Ok(::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
-        &self, _input: &::rustls::client::danger::SignatureVerificationInput,
+        &self, input: &::rustls::client::danger::SignatureVerificationInput,
     ) -> std::result::Result<
         ::rustls::client::danger::HandshakeSignatureValid,
         ::rustls::Error,
     > {
+        record_signature_scheme(&self.signature_scheme, input);
+
         Ok(::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -1220,12 +1428,16 @@ mod tests {
     fn handshake_clear_resets_early_data_state() {
         let (mut handshake, _crypto_ctx) = handshake(false);
         handshake.early_data_active = true;
+        *handshake.signature_scheme.lock().unwrap() =
+            Some(SignatureScheme::ECDSA_NISTP256_SHA256);
 
         assert!(handshake.is_in_early_data());
+        assert!(handshake.sigalg().is_some());
 
         handshake.clear().unwrap();
 
         assert!(!handshake.is_in_early_data());
+        assert!(handshake.sigalg().is_none());
     }
 
     #[test]
@@ -1319,6 +1531,7 @@ mod tests {
         assert!(client_crypto_ctx[packet::Epoch::Application].has_keys());
         assert_eq!(client.cipher(), Some(crypto::Algorithm::AES128_GCM));
         assert!(client.curve().is_some());
+        assert!(client.sigalg().is_some());
         assert!(!client.is_resumed());
 
         let expected_chain = example_cert_chain();
