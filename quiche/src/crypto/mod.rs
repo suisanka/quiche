@@ -115,9 +115,12 @@ pub struct Open {
 
     secret: Vec<u8>,
 
-    header: HeaderProtectionKey,
+    header: HeaderProtection,
 
-    packet: PacketKey,
+    packet: OpenPacketKey,
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    next: Option<::rustls::quic::Secrets>,
 }
 
 impl Open {
@@ -135,9 +138,19 @@ impl Open {
 
             secret,
 
-            header: HeaderProtectionKey::new(alg, hp_key)?,
+            header: HeaderProtection::Native(HeaderProtectionKey::new(
+                alg, hp_key,
+            )?),
 
-            packet: PacketKey::new(alg, key, iv, Self::DECRYPT)?,
+            packet: OpenPacketKey::Native(PacketKey::new(
+                alg,
+                key,
+                iv,
+                Self::DECRYPT,
+            )?),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            next: None,
         })
     }
 
@@ -147,10 +160,37 @@ impl Open {
 
             secret: secret.to_vec(),
 
-            header: HeaderProtectionKey::from_secret(aead, secret)?,
+            header: HeaderProtection::Native(HeaderProtectionKey::from_secret(
+                aead, secret,
+            )?),
 
-            packet: PacketKey::from_secret(aead, secret, Self::DECRYPT)?,
+            packet: OpenPacketKey::Native(PacketKey::from_secret(
+                aead,
+                secret,
+                Self::DECRYPT,
+            )?),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            next: None,
         })
+    }
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    pub fn from_rustls(
+        keys: ::rustls::quic::DirectionalKeys,
+        next: Option<::rustls::quic::Secrets>,
+    ) -> Open {
+        Open {
+            alg: Algorithm::AES128_GCM,
+
+            secret: Vec::new(),
+
+            header: HeaderProtection::Rustls(keys.header.into()),
+
+            packet: OpenPacketKey::Rustls(keys.packet),
+
+            next,
+        }
     }
 
     pub fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5]> {
@@ -166,6 +206,28 @@ impl Open {
     }
 
     pub fn derive_next_packet_key(&self) -> Result<Open> {
+        #[cfg(feature = "rustls-aws-lc-rs")]
+        if let Some(mut next) = self.next.clone() {
+            let keys = next.next_packet_keys();
+
+            return Ok(Open {
+                alg: self.alg,
+
+                secret: Vec::new(),
+
+                header: self.header.clone(),
+
+                packet: OpenPacketKey::Rustls(keys.remote),
+
+                next: Some(next),
+            });
+        }
+
+        #[cfg(feature = "rustls-aws-lc-rs")]
+        if self.packet.is_rustls() {
+            return Err(Error::CryptoFail);
+        }
+
         let next_secret = derive_next_secret(self.alg, &self.secret)?;
 
         let next_packet_key =
@@ -178,7 +240,10 @@ impl Open {
 
             header: self.header.clone(),
 
-            packet: next_packet_key,
+            packet: OpenPacketKey::Native(next_packet_key),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            next: None,
         })
     }
 
@@ -206,9 +271,12 @@ pub struct Seal {
 
     secret: Vec<u8>,
 
-    header: HeaderProtectionKey,
+    header: HeaderProtection,
 
-    packet: PacketKey,
+    packet: SealPacketKey,
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    next: Option<::rustls::quic::Secrets>,
 }
 
 impl Seal {
@@ -226,9 +294,19 @@ impl Seal {
 
             secret,
 
-            header: HeaderProtectionKey::new(alg, hp_key)?,
+            header: HeaderProtection::Native(HeaderProtectionKey::new(
+                alg, hp_key,
+            )?),
 
-            packet: PacketKey::new(alg, key, iv, Self::ENCRYPT)?,
+            packet: SealPacketKey::Native(PacketKey::new(
+                alg,
+                key,
+                iv,
+                Self::ENCRYPT,
+            )?),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            next: None,
         })
     }
 
@@ -238,10 +316,37 @@ impl Seal {
 
             secret: secret.to_vec(),
 
-            header: HeaderProtectionKey::from_secret(aead, secret)?,
+            header: HeaderProtection::Native(HeaderProtectionKey::from_secret(
+                aead, secret,
+            )?),
 
-            packet: PacketKey::from_secret(aead, secret, Self::ENCRYPT)?,
+            packet: SealPacketKey::Native(PacketKey::from_secret(
+                aead,
+                secret,
+                Self::ENCRYPT,
+            )?),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            next: None,
         })
+    }
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    pub fn from_rustls(
+        keys: ::rustls::quic::DirectionalKeys,
+        next: Option<::rustls::quic::Secrets>,
+    ) -> Seal {
+        Seal {
+            alg: Algorithm::AES128_GCM,
+
+            secret: Vec::new(),
+
+            header: HeaderProtection::Rustls(keys.header.into()),
+
+            packet: SealPacketKey::Rustls(keys.packet),
+
+            next,
+        }
     }
 
     pub fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5]> {
@@ -257,6 +362,28 @@ impl Seal {
     }
 
     pub fn derive_next_packet_key(&self) -> Result<Seal> {
+        #[cfg(feature = "rustls-aws-lc-rs")]
+        if let Some(mut next) = self.next.clone() {
+            let keys = next.next_packet_keys();
+
+            return Ok(Seal {
+                alg: self.alg,
+
+                secret: Vec::new(),
+
+                header: self.header.clone(),
+
+                packet: SealPacketKey::Rustls(keys.local),
+
+                next: Some(next),
+            });
+        }
+
+        #[cfg(feature = "rustls-aws-lc-rs")]
+        if self.packet.is_rustls() {
+            return Err(Error::CryptoFail);
+        }
+
         let next_secret = derive_next_secret(self.alg, &self.secret)?;
 
         let next_packet_key =
@@ -269,7 +396,10 @@ impl Seal {
 
             header: self.header.clone(),
 
-            packet: next_packet_key,
+            packet: SealPacketKey::Native(next_packet_key),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            next: None,
         })
     }
 
@@ -308,6 +438,119 @@ impl HeaderProtectionKey {
         derive_hdr_key(aead, secret, &mut hp_key)?;
 
         Self::new(aead, hp_key)
+    }
+}
+
+#[derive(Clone)]
+enum HeaderProtection {
+    Native(HeaderProtectionKey),
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    Rustls(std::sync::Arc<dyn ::rustls::quic::HeaderProtectionKey>),
+}
+
+impl HeaderProtection {
+    fn new_mask(&self, sample: &[u8]) -> Result<[u8; HP_MASK_LEN]> {
+        match self {
+            HeaderProtection::Native(key) => key.new_mask(sample),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            HeaderProtection::Rustls(key) => {
+                let mut first = 0x03;
+                let mut packet_number = [0; 4];
+
+                key.encrypt_in_place(sample, &mut first, &mut packet_number)
+                    .map_err(|_| Error::CryptoFail)?;
+
+                let mut mask = [0; HP_MASK_LEN];
+                mask[0] = (first ^ 0x03) & 0x1f;
+                mask[1..].copy_from_slice(&packet_number);
+
+                Ok(mask)
+            },
+        }
+    }
+}
+
+enum OpenPacketKey {
+    Native(PacketKey),
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    Rustls(Box<dyn ::rustls::quic::PacketKey>),
+}
+
+impl OpenPacketKey {
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    fn is_rustls(&self) -> bool {
+        matches!(self, OpenPacketKey::Rustls(_))
+    }
+
+    fn open_with_u64_counter(
+        &self, counter: u64, ad: &[u8], buf: &mut [u8],
+    ) -> Result<usize> {
+        match self {
+            OpenPacketKey::Native(key) =>
+                key.open_with_u64_counter(counter, ad, buf),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            OpenPacketKey::Rustls(key) => key
+                .decrypt_in_place(counter, ad, buf, None)
+                .map(|plaintext| plaintext.len())
+                .map_err(|_| Error::CryptoFail),
+        }
+    }
+}
+
+enum SealPacketKey {
+    Native(PacketKey),
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    Rustls(Box<dyn ::rustls::quic::PacketKey>),
+}
+
+impl SealPacketKey {
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    fn is_rustls(&self) -> bool {
+        matches!(self, SealPacketKey::Rustls(_))
+    }
+
+    fn seal_with_u64_counter(
+        &mut self, counter: u64, ad: &[u8], buf: &mut [u8], in_len: usize,
+        extra_in: Option<&[u8]>,
+    ) -> Result<usize> {
+        match self {
+            SealPacketKey::Native(key) =>
+                key.seal_with_u64_counter(counter, ad, buf, in_len, extra_in),
+
+            #[cfg(feature = "rustls-aws-lc-rs")]
+            SealPacketKey::Rustls(key) => {
+                let tag_len = key.tag_len();
+                let extra_len = extra_in.map_or(0, <[u8]>::len);
+                let plaintext_len = in_len + extra_len;
+
+                if plaintext_len + tag_len > buf.len() {
+                    return Err(Error::CryptoFail);
+                }
+
+                if let Some(extra) = extra_in {
+                    buf[in_len..plaintext_len].copy_from_slice(extra);
+                }
+
+                let tag = key
+                    .encrypt_in_place(
+                        counter,
+                        ad,
+                        &mut buf[..plaintext_len],
+                        None,
+                    )
+                    .map_err(|_| Error::CryptoFail)?;
+
+                buf[plaintext_len..plaintext_len + tag_len]
+                    .copy_from_slice(tag.as_ref());
+
+                Ok(plaintext_len + tag_len)
+            },
+        }
     }
 }
 

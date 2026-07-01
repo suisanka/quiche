@@ -418,11 +418,24 @@ impl Handshake {
             }
 
             match key_change {
-                Some(::rustls::quic::KeyChange::Handshake { .. }) => {
+                Some(::rustls::quic::KeyChange::Handshake { keys }) => {
+                    ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_open =
+                        Some(crypto::Open::from_rustls(keys.remote, None));
+                    ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_seal =
+                        Some(crypto::Seal::from_rustls(keys.local, None));
+
                     self.write_level = crypto::Level::Handshake;
                 },
 
-                Some(::rustls::quic::KeyChange::OneRtt { .. }) => {
+                Some(::rustls::quic::KeyChange::OneRtt { keys, next }) => {
+                    ex_data.crypto_ctx[packet::Epoch::Application].crypto_open =
+                        Some(crypto::Open::from_rustls(
+                            keys.remote,
+                            Some(next.clone()),
+                        ));
+                    ex_data.crypto_ctx[packet::Epoch::Application].crypto_seal =
+                        Some(crypto::Seal::from_rustls(keys.local, Some(next)));
+
                     self.write_level = crypto::Level::OneRTT;
                 },
 
@@ -533,6 +546,82 @@ fn observe_ex_data(ex_data: &mut ExData) {
 mod tests {
     use super::*;
 
+    fn handshake(is_server: bool) -> (Handshake, [packet::CryptoContext; 3]) {
+        let mut ctx = Context::new().unwrap();
+        ctx.set_verify(false);
+        ctx.set_alpn(&[b"h3"]).unwrap();
+
+        if is_server {
+            ctx.use_certificate_chain_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/cert.crt"
+            ))
+            .unwrap();
+            ctx.use_privkey_file(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/cert.key"
+            ))
+            .unwrap();
+        }
+
+        let mut handshake = ctx.new_handshake().unwrap();
+        handshake.init(is_server).unwrap();
+
+        if !is_server {
+            handshake.set_host_name("example.com").unwrap();
+        }
+
+        handshake
+            .set_quic_transport_params(
+                &crate::TransportParams::default(),
+                is_server,
+            )
+            .unwrap();
+
+        (handshake, [
+            packet::CryptoContext::new(),
+            packet::CryptoContext::new(),
+            packet::CryptoContext::new(),
+        ])
+    }
+
+    fn ex_data<'a>(
+        crypto_ctx: &'a mut [packet::CryptoContext; 3], is_server: bool,
+        application_protos: &'a Vec<Vec<u8>>, session: &'a mut Option<Vec<u8>>,
+        local_error: &'a mut Option<ConnectionError>,
+        recovery_config: crate::recovery::RecoveryConfig, tx_cap_factor: f64,
+    ) -> ExData<'a> {
+        ExData {
+            application_protos,
+            crypto_ctx,
+            session,
+            local_error,
+            keylog: None,
+            trace_id: "",
+            local_transport_params: crate::TransportParams::default(),
+            recovery_config,
+            tx_cap_factor,
+            pmtud: None,
+            is_server,
+        }
+    }
+
+    fn drain_crypto(
+        crypto_ctx: &mut [packet::CryptoContext; 3], epoch: packet::Epoch,
+    ) -> Vec<u8> {
+        let mut data = vec![0; 8192];
+        let len = crypto_ctx[epoch]
+            .crypto_stream
+            .send
+            .emit(&mut data)
+            .unwrap()
+            .0;
+
+        data.truncate(len);
+
+        data
+    }
+
     #[test]
     fn client_handshake_emits_initial_crypto() {
         let mut ctx = Context::new().unwrap();
@@ -573,6 +662,95 @@ mod tests {
 
         assert_eq!(handshake.do_handshake(&mut ex_data), Err(Error::Done));
         assert!(ex_data.crypto_ctx[packet::Epoch::Initial].data_available());
+    }
+
+    #[test]
+    fn handshake_installs_packet_keys() {
+        let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery_config =
+            crate::recovery::RecoveryConfig::from_config(&config);
+        let application_protos = vec![b"h3".to_vec()];
+        let mut client_session = None;
+        let mut server_session = None;
+        let mut client_error = None;
+        let mut server_error = None;
+
+        let (mut client, mut client_crypto_ctx) = handshake(false);
+        let (mut server, mut server_crypto_ctx) = handshake(true);
+
+        {
+            let mut client_ex_data = ex_data(
+                &mut client_crypto_ctx,
+                false,
+                &application_protos,
+                &mut client_session,
+                &mut client_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert!(matches!(
+                client.do_handshake(&mut client_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+        }
+
+        let client_initial =
+            drain_crypto(&mut client_crypto_ctx, packet::Epoch::Initial);
+        assert!(!client_initial.is_empty());
+
+        server
+            .provide_data(crypto::Level::Initial, &client_initial)
+            .unwrap();
+
+        {
+            let mut server_ex_data = ex_data(
+                &mut server_crypto_ctx,
+                true,
+                &application_protos,
+                &mut server_session,
+                &mut server_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert_eq!(
+                server.do_handshake(&mut server_ex_data),
+                Err(Error::Done)
+            );
+        }
+
+        assert!(server_crypto_ctx[packet::Epoch::Handshake].has_keys());
+        let server_initial =
+            drain_crypto(&mut server_crypto_ctx, packet::Epoch::Initial);
+        let server_handshake =
+            drain_crypto(&mut server_crypto_ctx, packet::Epoch::Handshake);
+        assert!(!server_initial.is_empty());
+        assert!(!server_handshake.is_empty());
+
+        client
+            .provide_data(crypto::Level::Initial, &server_initial)
+            .unwrap();
+        client
+            .provide_data(crypto::Level::Handshake, &server_handshake)
+            .unwrap();
+
+        {
+            let mut client_ex_data = ex_data(
+                &mut client_crypto_ctx,
+                false,
+                &application_protos,
+                &mut client_session,
+                &mut client_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert!(matches!(
+                client.do_handshake(&mut client_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+        }
+
+        assert!(client_crypto_ctx[packet::Epoch::Handshake].has_keys());
+        assert!(client_crypto_ctx[packet::Epoch::Application].has_keys());
     }
 
     #[test]
