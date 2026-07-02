@@ -25,21 +25,6 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 pub fn rand_bytes(buf: &mut [u8]) {
-    fill_random(buf);
-}
-
-#[cfg(feature = "boringssl-boring-crate")]
-fn fill_random(buf: &mut [u8]) {
-    unsafe {
-        RAND_bytes(buf.as_mut_ptr(), buf.len());
-    }
-}
-
-#[cfg(all(
-    not(feature = "boringssl-boring-crate"),
-    feature = "rustls-aws-lc-rs"
-))]
-fn fill_random(buf: &mut [u8]) {
     use aws_lc_rs::rand::SecureRandom;
 
     let rng = aws_lc_rs::rand::SystemRandom::new();
@@ -75,9 +60,4 @@ pub fn rand_u64_uniform(max: u64) -> u64 {
     }
 
     r / chunk_size
-}
-
-#[cfg(feature = "boringssl-boring-crate")]
-extern "C" {
-    fn RAND_bytes(buf: *mut u8, len: libc::size_t) -> libc::c_int;
 }
