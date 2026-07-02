@@ -15,7 +15,7 @@ COPY quiche/ ./quiche/
 COPY task-killswitch ./task-killswitch/
 COPY tokio-quiche ./tokio-quiche/
 
-# clang and cmake are required by boring-sys to build BoringSSL.
+# clang and cmake are required by the native TLS crypto dependencies.
 RUN apt-get update && apt-get install -y clang cmake && rm -rf /var/lib/apt/lists/*
 
 RUN cargo build --release --manifest-path apps/Cargo.toml

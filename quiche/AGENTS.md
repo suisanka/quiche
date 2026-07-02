@@ -17,7 +17,7 @@ src/
     congestion/              Legacy CC (Cubic, Reno, Hystart++)
     gcongestion/             Google-derived CC (BBR2) — behind `gcongestion` feature
   stream/                    Stream state machine, flow control per-stream
-  tls/                       TLS backend abstraction (BoringSSL)
+  tls/                       TLS backend abstraction (rustls/aws-lc-rs)
   crypto/                    Packet protection, key derivation
   packet.rs       (2.3k)     Packet parsing, ConnectionId, Header
   frame.rs                   QUIC frame encode/decode
@@ -40,7 +40,7 @@ include/
   quiche.h        (1.2k)     C API header — mirrors ffi.rs
 ```
 
-BoringSSL itself is built by `boring-sys` (no in-tree submodule).
+TLS uses rustls with the aws-lc-rs crypto provider.
 
 ## WHERE TO LOOK
 
@@ -50,10 +50,10 @@ BoringSSL itself is built by `boring-sys` (no in-tree submodule).
 | HTTP/3 streams/headers | `h3/mod.rs` — `h3::Connection` |
 | Loss detection / CC | `recovery/mod.rs` → `congestion/` or `gcongestion/` |
 | Packet parse/serialize | `packet.rs`, `frame.rs` |
-| TLS handshake | `tls/mod.rs` — cfg-gated per backend |
+| TLS handshake | `tls/mod.rs` — rustls/aws-lc-rs backend |
 | C bindings | `ffi.rs` + `include/quiche.h` |
 | Test harness | `test_utils.rs` (`Pipe` struct) |
-| Build system | `src/build.rs` — link directives + pkg-config metadata (BoringSSL is built by `boring-sys`) |
+| Build system | `src/build.rs` — pkg-config metadata |
 
 ## ANTI-PATTERNS
 
@@ -65,11 +65,10 @@ BoringSSL itself is built by `boring-sys` (no in-tree submodule).
 
 ## NOTES
 
-- `build.rs` is at `src/build.rs` (Cargo.toml: `build = "src/build.rs"`), not crate root. Emits link directives and, with `pkg-config-meta`, writes `quiche.pc`; BoringSSL itself is built by `boring-sys`.
-- Single TLS backend: `boringssl-boring-crate` (default), via the `boring`/`boring-sys` crates.
+- `build.rs` is at `src/build.rs` (Cargo.toml: `build = "src/build.rs"`), not crate root. With `pkg-config-meta`, it writes `quiche.pc`.
+- Single TLS backend: `rustls-aws-lc-rs` (default).
 - `quiche::Error` is `Copy + Clone` — intentional for hot-path ergonomics.
 - `test_utils::Pipe` exposed via `internal` feature for downstream crate integration tests.
 - Tests use `rstest` with `#[values("cubic", "bbr2_gcongestion")]` parameterization for CC coverage.
-- `BORING_BSSL_PATH` env var (consumed by `boring-sys`) points at a custom BoringSSL source tree.
 - Crate-type: `lib` + `staticlib` + `cdylib` — the latter two for C consumers.
 - `BufFactory` trait (`buffers.rs`) enables zero-copy buffer creation; `Connection<F>` is generic over it.
