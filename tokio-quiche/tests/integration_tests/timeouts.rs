@@ -24,17 +24,13 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[cfg(feature = "boringssl-boring-crate")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use boring::ssl::BoxSelectCertFinish;
-use boring::ssl::ClientHello;
-use boring::ssl::SslContextBuilder;
-use boring::ssl::SslFiletype;
-use boring::ssl::SslMethod;
 use h3i::actions::h3::send_headers_frame;
 use h3i::actions::h3::Action;
 use h3i::actions::h3::WaitType;
@@ -45,7 +41,9 @@ use h3i::quiche::{
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 use tokio_quiche::http3::driver::H3ConnectionError;
+#[cfg(feature = "boringssl-boring-crate")]
 use tokio_quiche::quic::ConnectionHook;
+#[cfg(feature = "boringssl-boring-crate")]
 use tokio_quiche::settings::TlsCertificatePaths;
 use url::Url;
 
@@ -53,8 +51,14 @@ use crate::fixtures::h3i_fixtures::*;
 use crate::fixtures::*;
 
 // TODO(erittenhouse): figure out a way to avoid all of this duplication
+#[cfg(feature = "boringssl-boring-crate")]
 #[tokio::test]
 async fn test_handshake_duration_ioworker() {
+    use boring::ssl::BoxSelectCertFinish;
+    use boring::ssl::ClientHello;
+    use boring::ssl::SslContextBuilder;
+    use boring::ssl::SslFiletype;
+    use boring::ssl::SslMethod;
     use h3i::client::ClientError;
 
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -158,8 +162,7 @@ async fn test_handshake_timeout_with_one_client_flight() {
     let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
     socket.connect(peer_addr).await.unwrap();
 
-    let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    boring::rand::rand_bytes(&mut scid).unwrap();
+    let scid = [0xba; quiche::MAX_CONN_ID_LEN];
     let scid = quiche::ConnectionId::from_ref(&scid);
 
     let local_addr = socket.local_addr().unwrap();

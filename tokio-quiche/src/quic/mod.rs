@@ -104,6 +104,7 @@ use crate::QuicResultExt;
 
 mod addr_validation_token;
 pub(crate) mod connection;
+mod crypto;
 mod hooks;
 mod io;
 pub mod raw;

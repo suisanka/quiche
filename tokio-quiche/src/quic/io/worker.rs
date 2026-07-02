@@ -48,10 +48,12 @@ use crate::quic::connection::HandshakeError;
 use crate::quic::connection::Incoming;
 use crate::quic::connection::QuicConnectionStats;
 use crate::quic::connection::SharedConnectionIdGenerator;
+use crate::quic::crypto;
 use crate::quic::router::ConnectionMapCommand;
 use crate::quic::QuicheConnection;
 use crate::QuicResult;
 
+#[cfg(feature = "boringssl-boring-crate")]
 use boring::ssl::SslRef;
 use datagram_socket::DatagramSocketSend;
 use datagram_socket::DatagramSocketSendExt;
@@ -778,6 +780,7 @@ pub struct Running<Tx, M, A> {
 }
 
 impl<Tx, M, A> Running<Tx, M, A> {
+    #[cfg(feature = "boringssl-boring-crate")]
     pub fn ssl(&mut self) -> &mut SslRef {
         // Deref to pick `Connection::as_mut` over `Box::as_mut`.
         (*self.qconn).as_mut()
@@ -809,19 +812,22 @@ where
     where
         A: ApplicationOverQuic,
     {
-        // This makes an assumption that the waker being set in ex_data is stable
-        // across the active task's lifetime. Moving a future that encompasses an
-        // async callback from this task across a channel, for example, will
-        // cause issues as this waker will then be stale and attempt to
-        // wake the wrong task.
-        std::future::poll_fn(|cx| {
-            // Deref to pick `Connection::as_mut` over `Box::as_mut`.
-            let ssl = (*qconn).as_mut();
-            ssl.set_task_waker(Some(cx.waker().clone()));
+        #[cfg(feature = "boringssl-boring-crate")]
+        {
+            // This makes an assumption that the waker being set in ex_data is
+            // stable across the active task's lifetime. Moving a future that
+            // encompasses an async callback from this task across a channel, for
+            // example, will cause issues as this waker will then be stale and
+            // attempt to wake the wrong task.
+            std::future::poll_fn(|cx| {
+                // Deref to pick `Connection::as_mut` over `Box::as_mut`.
+                let ssl = (*qconn).as_mut();
+                ssl.set_task_waker(Some(cx.waker().clone()));
 
-            Poll::Ready(())
-        })
-        .await;
+                Poll::Ready(())
+            })
+            .await;
+        }
 
         #[cfg(target_os = "linux")]
         if let Some(incoming) = ctx.in_pkt.as_mut() {
@@ -1070,6 +1076,6 @@ impl<M: Metrics> Drop for TrackMidHandshakeFlush<M> {
 
 fn random_u128() -> u128 {
     let mut buf = [0; 16];
-    boring::rand::rand_bytes(&mut buf).expect("boring's RAND_bytes never fails");
+    crypto::rand_bytes(&mut buf);
     u128::from_ne_bytes(buf)
 }

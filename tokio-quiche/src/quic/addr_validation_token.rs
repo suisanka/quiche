@@ -32,6 +32,7 @@ use std::io::{
 use std::net::IpAddr;
 use std::net::SocketAddr;
 
+use crate::quic::crypto;
 use crate::QuicResultExt;
 
 const HMAC_KEY_LEN: usize = 32;
@@ -44,7 +45,7 @@ pub(crate) struct AddrValidationTokenManager {
 impl Default for AddrValidationTokenManager {
     fn default() -> Self {
         let mut key_bytes = [0; HMAC_KEY_LEN];
-        boring::rand::rand_bytes(&mut key_bytes).unwrap();
+        crypto::rand_bytes(&mut key_bytes);
 
         AddrValidationTokenManager {
             sign_key: key_bytes,
@@ -68,14 +69,11 @@ impl AddrValidationTokenManager {
         token.write_all(&ip_bytes).unwrap();
         token.write_all(original_dcid).unwrap();
 
-        let tag = boring::hash::hmac_sha256(
-            &self.sign_key,
-            &token.get_ref()[HMAC_TAG_LEN..],
-        )
-        .unwrap();
+        let tag =
+            crypto::hmac_sha256(&self.sign_key, &token.get_ref()[HMAC_TAG_LEN..]);
 
         token.set_position(0);
-        token.write_all(tag.as_ref()).unwrap();
+        token.write_all(&tag).unwrap();
 
         token.into_inner()
     }
@@ -96,10 +94,9 @@ impl AddrValidationTokenManager {
 
         let (tag, payload) = token.split_at(HMAC_TAG_LEN);
 
-        let expected_tag =
-            boring::hash::hmac_sha256(&self.sign_key, payload).unwrap();
+        let expected_tag = crypto::hmac_sha256(&self.sign_key, payload);
 
-        if !boring::memcmp::eq(&expected_tag, tag) {
+        if !crypto::verify_slices_are_equal(&expected_tag, tag) {
             return Err("signature verification failed").into_io();
         }
 

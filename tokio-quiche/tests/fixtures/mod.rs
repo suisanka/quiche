@@ -102,6 +102,7 @@ impl TestConnectionHook {
 }
 
 impl ConnectionHook for TestConnectionHook {
+    #[cfg(feature = "boringssl-boring-crate")]
     fn create_custom_ssl_context_builder(
         &self, _settings: TlsCertificatePaths<'_>,
     ) -> Option<boring::ssl::SslContextBuilder> {

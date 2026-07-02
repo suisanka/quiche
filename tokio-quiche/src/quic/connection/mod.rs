@@ -34,7 +34,6 @@ pub use self::id::SharedConnectionIdGenerator;
 pub use self::id::SimpleConnectionIdGenerator;
 pub(crate) use self::map::ConnectionMap;
 
-use boring::ssl::SslRef;
 use datagram_socket::AsSocketStats;
 use datagram_socket::DatagramSocketSend;
 use datagram_socket::MaybeConnectedSocket;
@@ -55,6 +54,9 @@ use std::time::Instant;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
+
+#[cfg(feature = "boringssl-boring-crate")]
+use boring::ssl::SslRef;
 
 use self::error::make_handshake_result;
 use super::io::connection_stage::Close;
@@ -274,6 +276,7 @@ where
     }
 
     /// [boring]'s SSL object for this connection.
+    #[cfg(feature = "boringssl-boring-crate")]
     #[doc(hidden)]
     pub fn ssl_mut(&mut self) -> &mut SslRef {
         // Deref to pick `Connection::as_mut` over `Box::as_mut`.

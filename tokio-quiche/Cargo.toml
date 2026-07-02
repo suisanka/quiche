@@ -11,7 +11,21 @@ readme = "README.md"
 rust-version = "1.88"
 
 [features]
-default = ["qlog-gzip", "qlog-zstd"]
+default = ["boringssl-boring-crate", "qlog-gzip", "qlog-zstd"]
+
+# Use the BoringSSL library provided by the boring crate.
+boringssl-boring-crate = [
+  "dep:boring",
+  "h3i/boringssl-boring-crate",
+  "quiche/boringssl-boring-crate",
+]
+
+# Use rustls with the aws-lc-rs crypto provider.
+rustls-aws-lc-rs = [
+  "dep:aws-lc-rs",
+  "h3i/rustls-aws-lc-rs",
+  "quiche/rustls-aws-lc-rs",
+]
 
 # Forwarded quiche features for re-exports
 fuzzing = ["quiche/fuzzing"]
@@ -22,7 +36,7 @@ quiche_internal = ["quiche/internal"]
 perf-quic-listener-metrics = []
 
 # Enable raw public key (RPK) support for QUIC handshakes.
-rpk = ["boring/rpk"]
+rpk = ["boringssl-boring-crate", "boring/rpk"]
 
 # Replaces quiche's original congestion control
 # implementation with one adapted from google/quiche.
@@ -68,7 +82,8 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-boring = { workspace = true }
+aws-lc-rs = { workspace = true, optional = true }
+boring = { workspace = true, optional = true }
 bytes = { workspace = true }
 crossbeam = { workspace = true, default-features = false }
 datagram-socket = { workspace = true }
@@ -82,7 +97,7 @@ log = { workspace = true }
 octets = { workspace = true }
 pin-project = { workspace = true }
 qlog = { workspace = true, features = ["foundations"] }
-quiche = { workspace = true, features = ["boringssl-boring-crate", "qlog"] }
+quiche = { workspace = true, features = ["qlog"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_with = { workspace = true }
 slog-scope = { workspace = true }
@@ -105,7 +120,7 @@ url = { workspace = true }
 assert_matches = { workspace = true }
 clap = { version = "4.5.40", features = ["derive"] }
 env_logger = { workspace = true }
-h3i = { workspace = true }
+h3i = { workspace = true, default-features = false }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"

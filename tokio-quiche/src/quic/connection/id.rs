@@ -27,6 +27,7 @@
 use quiche::ConnectionId;
 use std::sync::Arc;
 
+use crate::quic::crypto;
 use crate::QuicResult;
 
 /// A customizable generator to derive and verify QUIC connection IDs.
@@ -58,7 +59,7 @@ pub struct SimpleConnectionIdGenerator;
 impl ConnectionIdGenerator<'static> for SimpleConnectionIdGenerator {
     fn new_connection_id(&self) -> ConnectionId<'static> {
         let mut buf = vec![0; 20];
-        boring::rand::rand_bytes(&mut buf).unwrap();
+        crypto::rand_bytes(&mut buf);
 
         ConnectionId::from_vec(buf)
     }

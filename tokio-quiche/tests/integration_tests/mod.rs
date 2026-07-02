@@ -40,6 +40,7 @@ use tokio_quiche::settings::TlsCertificatePaths;
 use tokio_quiche::ConnectionParams;
 use tokio_quiche::InitialQuicConnection;
 
+#[cfg(feature = "boringssl-boring-crate")]
 pub mod async_callbacks;
 pub mod connection_close;
 pub mod headers;
@@ -54,7 +55,7 @@ async fn echo() {
     const CONN_COUNT: usize = 5;
 
     let req_count = |conn_num| conn_num * 100;
-    let (url, hook, _) = start_server();
+    let (url, _hook, _) = start_server();
     let mut reqs = vec![];
 
     for i in 1..=CONN_COUNT {
@@ -74,12 +75,13 @@ async fn echo() {
         assert_eq!(resps.len(), req_count(i));
     }
 
-    assert!(hook.was_called());
+    #[cfg(feature = "boringssl-boring-crate")]
+    assert!(_hook.was_called());
 }
 
 #[tokio::test]
 async fn e2e() {
-    let (url, hook, _) = start_server();
+    let (url, _hook, _) = start_server();
     let url = format!("{url}/1");
 
     let res = request(url, 1).await.unwrap();
@@ -89,7 +91,8 @@ async fn e2e() {
 
     let resps = res_map.get(&1).unwrap();
     assert_eq!(resps.len(), 1);
-    assert!(hook.was_called());
+    #[cfg(feature = "boringssl-boring-crate")]
+    assert!(_hook.was_called());
 }
 
 #[tokio::test]
@@ -118,6 +121,7 @@ async fn e2e_client_ip_validation_disabled() {
 
     let resps = res_map.get(&1).unwrap();
     assert_eq!(resps.len(), 1);
+    #[cfg(feature = "boringssl-boring-crate")]
     assert!(hook.was_called());
 }
 

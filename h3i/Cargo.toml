@@ -20,12 +20,23 @@ workspace = true
 default = ["boringssl-boring-crate"]
 
 # Use the BoringSSL library provided by the boring crate.
-boringssl-boring-crate = ["quiche/boringssl-boring-crate"]
+boringssl-boring-crate = [
+  "quiche/boringssl-boring-crate",
+  "tokio-quiche?/boringssl-boring-crate",
+]
 
 # Use rustls with the aws-lc-rs crypto provider.
-rustls-aws-lc-rs = ["quiche/rustls-aws-lc-rs"]
+rustls-aws-lc-rs = [
+  "quiche/rustls-aws-lc-rs",
+  "tokio-quiche?/rustls-aws-lc-rs",
+]
 
-async = ["dep:tokio", "dep:tokio-quiche"]
+async = [
+  "dep:tokio",
+  "dep:tokio-quiche",
+  "tokio-quiche/qlog-gzip",
+  "tokio-quiche/qlog-zstd",
+]
 
 [dependencies]
 clap = "3"
@@ -45,4 +56,7 @@ url = { workspace = true }
 
 # Dependencies for async client
 tokio = { version = "1.44", features = ["net", "sync", "time"], optional = true }
-tokio-quiche = { features = ["capture_keylogs", "quiche_internal"], optional = true, workspace = true }
+tokio-quiche = { default-features = false, features = [
+  "capture_keylogs",
+  "quiche_internal",
+], optional = true, workspace = true }
