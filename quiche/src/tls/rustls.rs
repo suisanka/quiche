@@ -44,12 +44,17 @@ use ::rustls::crypto::CipherSuite;
 use ::rustls::crypto::Credentials;
 use ::rustls::crypto::Identity;
 use ::rustls::crypto::SignatureScheme;
+#[cfg(test)]
+use ::rustls::crypto::Signer;
+use ::rustls::crypto::SigningKey;
 use ::rustls::crypto::SingleCredential;
 use ::rustls::crypto::TicketProducer;
 use ::rustls::error::CertificateError;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
+#[cfg(test)]
+use ::rustls::pki_types::SubjectPublicKeyInfoDer;
 use ::rustls::server::StoresServerSessions;
 use ::rustls::DistinguishedName;
 use ::rustls::RootCertStore;
@@ -126,6 +131,8 @@ impl Context {
             peer_identity_recorder: Arc::new(Mutex::new(None)),
             recorded_peer_identity: None,
             session_store: Arc::new(QuicheClientSessionStore::new()),
+            #[cfg(test)]
+            failing_private_key_method: false,
         })
     }
 
@@ -238,6 +245,8 @@ pub struct Handshake {
     peer_identity_recorder: RecordedPeerIdentity,
     recorded_peer_identity: Option<Identity<'static>>,
     session_store: Arc<QuicheClientSessionStore>,
+    #[cfg(test)]
+    failing_private_key_method: bool,
 }
 
 impl Handshake {
@@ -406,7 +415,9 @@ impl Handshake {
     }
 
     #[cfg(test)]
-    pub fn set_failing_private_key_method(&mut self) {}
+    pub fn set_failing_private_key_method(&mut self) {
+        self.failing_private_key_method = true;
+    }
 
     pub fn is_in_early_data(&self) -> bool {
         self.early_data_active
@@ -522,6 +533,7 @@ impl Handshake {
             .key_provider
             .load_private_key(private_key)
             .map_err(|_| Error::TlsFail)?;
+        let signing_key = self.wrap_signing_key(signing_key);
         let credentials =
             Credentials::new_unchecked(certificate_identity, signing_key);
         let config_builder =
@@ -610,6 +622,7 @@ impl Handshake {
                     .key_provider
                     .load_private_key(private_key.clone_key())
                     .map_err(|_| Error::TlsFail)?;
+                let signing_key = self.wrap_signing_key(signing_key);
                 let credentials =
                     Credentials::new_unchecked(identity.clone(), signing_key);
 
@@ -625,6 +638,19 @@ impl Handshake {
 
             _ => Err(Error::TlsFail),
         }
+    }
+
+    fn wrap_signing_key(
+        &self, signing_key: Box<dyn SigningKey>,
+    ) -> Box<dyn SigningKey> {
+        #[cfg(test)]
+        {
+            if self.failing_private_key_method {
+                return Box::new(FailingSigningKey { inner: signing_key });
+            }
+        }
+
+        signing_key
     }
 
     fn flush_keylog(&self, ex_data: &mut ExData) {
@@ -1748,6 +1774,50 @@ impl fmt::Debug for QuicheTicketProducer {
 
 type RecordedSignatureScheme = Arc<Mutex<Option<SignatureScheme>>>;
 type RecordedPeerIdentity = Arc<Mutex<Option<Identity<'static>>>>;
+
+#[cfg(test)]
+#[derive(Debug)]
+struct FailingSigningKey {
+    inner: Box<dyn SigningKey>,
+}
+
+#[cfg(test)]
+impl SigningKey for FailingSigningKey {
+    fn choose_scheme(
+        &self, offered: &[SignatureScheme],
+    ) -> Option<Box<dyn Signer>> {
+        let signer = self.inner.choose_scheme(offered)?;
+
+        Some(Box::new(FailingSigner {
+            scheme: signer.scheme(),
+        }))
+    }
+
+    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+        self.inner.public_key()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct FailingSigner {
+    scheme: SignatureScheme,
+}
+
+#[cfg(test)]
+impl Signer for FailingSigner {
+    fn sign(
+        self: Box<Self>, _message: &[u8],
+    ) -> std::result::Result<Vec<u8>, ::rustls::Error> {
+        Err(::rustls::Error::General(
+            "failing private key method".to_string(),
+        ))
+    }
+
+    fn scheme(&self) -> SignatureScheme {
+        self.scheme
+    }
+}
 
 fn record_signature_scheme(
     signature_scheme: &RecordedSignatureScheme,
