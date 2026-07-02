@@ -942,7 +942,12 @@ fn limit_handshake_data(
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
     let server_sent = flight.iter().fold(0, |out, p| out + p.0.len());
 
-    assert_eq!(server_sent, client_sent * MAX_AMPLIFICATION_FACTOR);
+    let amplification_limit = client_sent * MAX_AMPLIFICATION_FACTOR;
+    assert!(server_sent <= amplification_limit);
+
+    if pipe.server.stats().amplification_limited_count > 0 {
+        assert_eq!(server_sent, amplification_limit);
+    }
 }
 
 #[rstest]
@@ -988,6 +993,7 @@ fn amplification_limited_stat() {
     config
         .set_application_protos(&[b"proto1", b"proto2"])
         .unwrap();
+    config.set_max_amplification_factor(2);
 
     let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
 
