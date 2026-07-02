@@ -628,7 +628,7 @@ pub extern "C" fn quiche_retry(
 }
 
 #[no_mangle]
-#[cfg(feature = "custom-client-dcid")]
+#[cfg(all(feature = "boringssl-boring-crate", feature = "custom-client-dcid"))]
 pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
     local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
@@ -669,19 +669,23 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 }
 
 #[no_mangle]
-#[cfg(not(feature = "custom-client-dcid"))]
+#[cfg(not(all(
+    feature = "boringssl-boring-crate",
+    feature = "custom-client-dcid"
+)))]
 #[allow(unused_variables)]
 pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
     local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
     config: &Config, ssl: *mut c_void,
 ) -> *mut Connection {
-    // It's always an error to call this function without the custom-client-dcid
-    // feature enabled.
+    // This entry point requires both custom client DCID support and the
+    // BoringSSL backend's externally supplied TLS object.
     ptr::null_mut()
 }
 
 #[no_mangle]
+#[cfg(feature = "boringssl-boring-crate")]
 pub extern "C" fn quiche_conn_new_with_tls(
     scid: *const u8, scid_len: size_t, odcid: *const u8, odcid_len: size_t,
     local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
@@ -715,6 +719,19 @@ pub extern "C" fn quiche_conn_new_with_tls(
 
         Err(_) => ptr::null_mut(),
     }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "boringssl-boring-crate"))]
+#[allow(unused_variables)]
+pub extern "C" fn quiche_conn_new_with_tls(
+    scid: *const u8, scid_len: size_t, odcid: *const u8, odcid_len: size_t,
+    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
+    config: &Config, ssl: *mut c_void, is_server: bool,
+) -> *mut Connection {
+    // Rustls connections are created from quiche_config via quiche_accept() or
+    // quiche_connect(); the external SSL pointer constructor is BoringSSL-only.
+    ptr::null_mut()
 }
 
 #[no_mangle]

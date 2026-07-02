@@ -29,11 +29,6 @@ compile_error!(
     "features boringssl-boring-crate and rustls-aws-lc-rs are mutually exclusive"
 );
 
-#[cfg(all(feature = "ffi", feature = "rustls-aws-lc-rs"))]
-compile_error!(
-    "the C FFI TLS entry points currently require the BoringSSL backend"
-);
-
 #[cfg(feature = "boringssl-boring-crate")]
 mod boringssl;
 

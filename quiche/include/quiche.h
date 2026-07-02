@@ -326,6 +326,8 @@ ssize_t quiche_retry(const uint8_t *scid, size_t scid_len,
 // Returns true if the given protocol version is supported.
 bool quiche_version_is_supported(uint32_t version);
 
+// Creates a connection from an externally supplied TLS object. This requires a
+// BoringSSL-backed build; rustls-backed builds return NULL.
 quiche_conn *quiche_conn_new_with_tls(const uint8_t *scid, size_t scid_len,
                                       const uint8_t *odcid, size_t odcid_len,
                                       const struct sockaddr *local, socklen_t local_len,
@@ -333,7 +335,9 @@ quiche_conn *quiche_conn_new_with_tls(const uint8_t *scid, size_t scid_len,
                                       const quiche_config *config, void *ssl,
                                       bool is_server);
 
-// Needs to have custom-client-dcid feature enabled on compile time. Otherwise will always return NULL.
+// Creates a client connection from an externally supplied TLS object and DCID.
+// This requires a BoringSSL-backed build with custom-client-dcid enabled;
+// otherwise it returns NULL.
 quiche_conn *quiche_conn_new_with_tls_and_client_dcid(const uint8_t *scid, size_t scid_len,
                                       const uint8_t *dcid, size_t dcid_len,
                                       const struct sockaddr *local, socklen_t local_len,
