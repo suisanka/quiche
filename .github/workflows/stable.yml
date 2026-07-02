@@ -8,8 +8,8 @@ permissions:
 
 env:
   DEFAULT_OPTIONS: "--features=async,ffi,qlog --workspace"
-  # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
-  NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
+  # Used by `quiche_multiarch` to keep cross builds focused on portable crates.
+  MULTIARCH_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
   RUSTFLAGS: "-D warnings"
   RUSTTOOLCHAIN: "stable"
 
@@ -199,7 +199,7 @@ jobs:
         run: cargo-binstall -y cross
 
       - name: Run cargo test using cross
-        run: cross test --target=${{ matrix.target }} --verbose --all-targets ${{ env.NO_BORING_OPTIONS }} --exclude qlog-dancer
+        run: cross test --target=${{ matrix.target }} --verbose --all-targets ${{ env.MULTIARCH_OPTIONS }} --exclude qlog-dancer
 
   http3_test:
     runs-on: ubuntu-latest
