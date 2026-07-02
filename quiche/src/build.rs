@@ -44,11 +44,6 @@ fn target_dir_path() -> std::path::PathBuf {
 }
 
 fn main() {
-    if cfg!(feature = "boringssl-boring-crate") {
-        println!("cargo:rustc-link-lib=static=ssl");
-        println!("cargo:rustc-link-lib=static=crypto");
-    }
-
     // MacOS: Allow cdylib to link with undefined symbols
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os == "macos" {

@@ -327,31 +327,7 @@ cargo can also be used to run the testsuite:
 
 By default quiche uses [rustls] with the [aws-lc-rs] crypto provider for
 QUIC's cryptographic handshake based on TLS.
-
-[BoringSSL] remains available as an explicit backend:
-
-```bash
- $ cargo build --examples --no-default-features --features boringssl-boring-crate
-```
-
-When building with BoringSSL, it needs to be built and linked to quiche. This is
-done automatically by the [boring-sys] crate when building with cargo, but
-requires the `cmake` command to be available during the build process.
-
-On Windows [NASM](https://www.nasm.us/) is also required. The [official BoringSSL
-documentation](https://github.com/google/boringssl/blob/master/BUILDING.md) has
-more details.
-
-In alternative you can use your own custom build of BoringSSL by configuring
-the BoringSSL directory with the ``BORING_BSSL_PATH`` environment variable:
-
-```bash
- $ BORING_BSSL_PATH="/path/to/boringssl" cargo build --examples
-```
-
-[BoringSSL]: https://boringssl.googlesource.com/boringssl/
 [aws-lc-rs]: https://crates.io/crates/aws-lc-rs
-[boring-sys]: https://crates.io/crates/boring-sys
 [rustls]: https://crates.io/crates/rustls
 
 ### Building for Android

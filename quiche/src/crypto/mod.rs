@@ -24,9 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(feature = "boringssl-boring-crate")]
-use libc::c_void;
-
 use crate::Error;
 use crate::Result;
 
@@ -101,13 +98,6 @@ impl Algorithm {
     }
 }
 
-#[allow(non_camel_case_types)]
-#[repr(transparent)]
-#[cfg(feature = "boringssl-boring-crate")]
-pub struct EVP_AEAD {
-    _unused: c_void,
-}
-
 type HeaderProtectionMask = [u8; HP_MASK_LEN];
 
 pub struct Open {
@@ -124,9 +114,6 @@ pub struct Open {
 }
 
 impl Open {
-    // Note: some vendor-specific methods are implemented in the boringssl
-    // submodule.
-
     pub const DECRYPT: u32 = 0;
 
     pub fn new(
@@ -280,9 +267,6 @@ pub struct Seal {
 }
 
 impl Seal {
-    // Note: some vendor-specific methods are implemented in the boringssl
-    // submodule.
-
     pub const ENCRYPT: u32 = 1;
 
     pub fn new(
@@ -880,8 +864,3 @@ mod tests {
 mod aws_lc;
 #[cfg(feature = "rustls-aws-lc-rs")]
 pub(crate) use aws_lc::*;
-
-#[cfg(feature = "boringssl-boring-crate")]
-mod boringssl;
-#[cfg(feature = "boringssl-boring-crate")]
-pub(crate) use boringssl::*;

@@ -27,9 +27,6 @@ workspace = true
 [features]
 default = ["rustls-aws-lc-rs"]
 
-# Use the BoringSSL library provided by the boring crate.
-boringssl-boring-crate = ["boring"]
-
 # Use rustls with the aws-lc-rs crypto provider.
 rustls-aws-lc-rs = [
   "dep:rustls",
@@ -75,7 +72,6 @@ cdylib-link-lines = { version = "0.1", optional = true }
 
 [dependencies]
 bytes = { workspace = true }
-boring = { workspace = true, optional = true }
 aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
 debug_panic = { workspace = true }
 either = { version = "1.8", default-features = false }

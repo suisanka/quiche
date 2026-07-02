@@ -24,27 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(all(feature = "boringssl-boring-crate", feature = "rustls-aws-lc-rs"))]
-compile_error!(
-    "features boringssl-boring-crate and rustls-aws-lc-rs are mutually exclusive"
-);
-
-#[cfg(feature = "boringssl-boring-crate")]
-mod boringssl;
-
-#[cfg(feature = "boringssl-boring-crate")]
-pub use boringssl::*;
-
 #[cfg(feature = "rustls-aws-lc-rs")]
 mod rustls;
 
 #[cfg(feature = "rustls-aws-lc-rs")]
 pub use self::rustls::*;
 
-#[cfg(not(any(
-    feature = "boringssl-boring-crate",
-    feature = "rustls-aws-lc-rs"
-)))]
-compile_error!(
-    "quiche requires exactly one TLS backend feature: boringssl-boring-crate or rustls-aws-lc-rs"
-);
+#[cfg(not(feature = "rustls-aws-lc-rs"))]
+compile_error!("quiche requires the rustls-aws-lc-rs TLS backend feature");

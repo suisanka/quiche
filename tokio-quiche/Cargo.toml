@@ -13,12 +13,6 @@ rust-version = "1.88"
 [features]
 default = ["rustls-aws-lc-rs", "qlog-gzip", "qlog-zstd"]
 
-# Use the BoringSSL library provided by the boring crate.
-boringssl-boring-crate = [
-  "h3i/boringssl-boring-crate",
-  "quiche/boringssl-boring-crate",
-]
-
 # Use rustls with the aws-lc-rs crypto provider.
 rustls-aws-lc-rs = [
   "h3i/rustls-aws-lc-rs",

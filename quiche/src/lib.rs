@@ -360,9 +360,6 @@
 //! * `rustls-aws-lc-rs` (default): Use rustls with the aws-lc-rs crypto
 //!   provider.
 //!
-//! * `boringssl-boring-crate`: Use the BoringSSL library provided by the
-//!   [boring] crate.
-//!
 //! * `pkg-config-meta`: Generate pkg-config metadata file for libquiche.
 //!
 //! * `ffi`: Build and expose the FFI API.
@@ -374,7 +371,6 @@
 //!   unpredictability and length requirements.
 //!
 //! [feature flags]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section
-//! [boring]: https://crates.io/crates/boring
 //! [qlog]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema
 
 #![allow(clippy::upper_case_acronyms)]
@@ -7397,10 +7393,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns the early data reason for the connection.
     ///
-    /// This status can be useful for logging and debugging. See [BoringSSL]
-    /// documentation for a definition of the reasons.
-    ///
-    /// [BoringSSL]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#ssl_early_data_reason_t
+    /// This status can be useful for logging and debugging.
     #[inline]
     pub fn early_data_reason(&self) -> u32 {
         self.handshake.early_data_reason()

@@ -11,7 +11,7 @@ Cloudflare's QUIC and HTTP/3 implementation in Rust. Workspace of 11 crates: cor
 ## STRUCTURE
 
 ```
-quiche/                     # Core QUIC+H3 library (rustls default; BoringSSL opt-in)
+quiche/                     # Core QUIC+H3 library (rustls/aws-lc-rs TLS backend)
 tokio-quiche/               # Async tokio wrapper (server/client drivers)
 apps/                       # CLI binaries: quiche-client, quiche-server
 h3i/                        # HTTP/3 interactive testing/debugging tool
@@ -48,7 +48,7 @@ quiche  datagram-socket  qlog-dancer        (Layer 1)
 | QUIC connection logic | `quiche/src/lib.rs` | 9k lines, core `Connection` struct |
 | HTTP/3 protocol | `quiche/src/h3/mod.rs` | Own `Error`/`Result` types |
 | Congestion control | `quiche/src/recovery/` | Two impls: `congestion/` (legacy) + `gcongestion/` (BBR2) |
-| TLS/crypto backends | `quiche/src/tls/`, `quiche/src/crypto/` | rustls default; BoringSSL opt-in |
+| TLS/crypto backends | `quiche/src/tls/`, `quiche/src/crypto/` | rustls/aws-lc-rs only |
 | C FFI | `quiche/src/ffi.rs` + `quiche/include/quiche.h` | Behind `ffi` feature |
 | Async server/client | `tokio-quiche/src/` | `ApplicationOverQuic` trait is the extension point |
 | H3 async driver | `tokio-quiche/src/http3/driver/` | `DriverHooks` sealed trait, channels |
@@ -99,14 +99,14 @@ quiche  datagram-socket  qlog-dancer        (Layer 1)
 
 ```
 quiche:        default=rustls-aws-lc-rs
-               boringssl-boring-crate, rustls-aws-lc-rs, qlog, gcongestion,
+               rustls-aws-lc-rs, qlog, gcongestion,
                internal, ffi, fuzzing, sfv, custom-client-dcid,
                pkg-config-meta
 tokio-quiche:  default=rustls-aws-lc-rs,qlog-gzip,qlog-zstd
-               boringssl-boring-crate, rustls-aws-lc-rs, fuzzing,
-               quiche_internal, gcongestion, zero-copy, rpk
+               rustls-aws-lc-rs, fuzzing, quiche_internal, gcongestion,
+               zero-copy, rpk
 h3i:           default=rustls-aws-lc-rs
-               boringssl-boring-crate, rustls-aws-lc-rs, async
+               rustls-aws-lc-rs, async
                (async enables tokio-quiche dependency)
 ```
 
@@ -115,7 +115,6 @@ h3i:           default=rustls-aws-lc-rs
 ```bash
 # Dev
 cargo build                                           # default rustls/aws-lc-rs backend
-cargo build --workspace --no-default-features --features boringssl-boring-crate,qlog,sfv
 cargo build --workspace --no-default-features --features rustls-aws-lc-rs,qlog,sfv
 cargo test --all-targets --features=async,ffi,qlog --workspace  # full test suite
 cargo test --doc --features=async,ffi,qlog --workspace          # doc tests (separate!)
@@ -133,13 +132,9 @@ make docker-build                                     # quiche-base + quiche-qns
 
 ## NOTES
 
-- **No git submodules**: BoringSSL is built by `boring-sys` only when
-  `boringssl-boring-crate` is enabled; `cmake` must be available for that
-  backend.
+- **No git submodules**: TLS uses rustls/aws-lc-rs.
 - **MSRV 1.88**: `rust-version` field in Cargo.toml.
 - **Doc tests are separate**: `cargo test --all-targets` does NOT run doc tests (cargo#6669).
-- **`BORING_BSSL_PATH`**: env var to point `boring-sys` at a custom BoringSSL
-  source tree when using the BoringSSL backend.
 - **`RUSTFLAGS="-D warnings"`**: CI enforces; all warnings are errors.
 - **Cargo.lock is gitignored** (library project).
 - **Dual CI**: GitHub Actions (real) + GitLab CI (no-op stub).
