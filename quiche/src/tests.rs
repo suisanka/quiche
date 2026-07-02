@@ -8920,11 +8920,7 @@ fn app_close_by_server_during_handshake_private_key_failure(
     assert_eq!(pipe.advance(), Ok(()));
 
     // The TLS backend owns its alert-to-transport-error mapping.
-    let expected_error_code = if cfg!(feature = "rustls-aws-lc-rs") {
-        0x0a
-    } else {
-        0x01
-    };
+    let expected_error_code = if cfg!(feature = "rustls") { 0x0a } else { 0x01 };
 
     assert_eq!(
         pipe.server.local_error(),

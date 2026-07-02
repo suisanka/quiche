@@ -134,9 +134,11 @@ multiplexed requests within the same connection.
 # Feature Flags
 
 tokio-quiche supports a number of feature flags to enable experimental features,
-performance enhancements, and additional telemetry. By default, rustls/aws-lc-rs
-and QLOG compression support are enabled.
+performance enhancements, and additional telemetry. By default, rustls with the
+aws-lc-rs fallback provider and QLOG compression support are enabled.
 
+- `rustls`: Use rustls with an application-installed crypto provider.
+- `rustls-aws-lc-rs`: Use rustls with the aws-lc-rs fallback provider.
 - `rpk`: Support for raw public keys (RPK) in QUIC handshakes via rustls.
 - `gcongestion`: Replace quiche's original congestion control implementation with one
    adapted from google/quiche.

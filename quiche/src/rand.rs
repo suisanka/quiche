@@ -25,11 +25,7 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 pub fn rand_bytes(buf: &mut [u8]) {
-    use aws_lc_rs::rand::SecureRandom;
-
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-
-    rng.fill(buf)
+    crate::crypto::fill_random(buf)
         .expect("failed to generate secure random bytes");
 }
 

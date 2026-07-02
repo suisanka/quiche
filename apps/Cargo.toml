@@ -13,8 +13,11 @@ publish = false
 workspace = true
 
 [features]
-# Use rustls with the aws-lc-rs crypto provider.
-rustls-aws-lc-rs = ["quiche/rustls-aws-lc-rs"]
+# Use rustls with an application-installed crypto provider.
+rustls = ["quiche/rustls"]
+
+# Use rustls with the aws-lc-rs crypto provider as the fallback provider.
+rustls-aws-lc-rs = ["rustls", "quiche/rustls-aws-lc-rs"]
 
 # Enable quiche's fuzzing mode.
 fuzzing = ["quiche/fuzzing"]

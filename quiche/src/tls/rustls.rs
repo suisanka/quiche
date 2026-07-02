@@ -50,6 +50,7 @@ use ::rustls::crypto::SigningKey;
 use ::rustls::crypto::SingleCredential;
 use ::rustls::crypto::TicketProducer;
 use ::rustls::error::CertificateError;
+use ::rustls::pki_types::alg_id;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
@@ -58,16 +59,6 @@ use ::rustls::server::StoresServerSessions;
 use ::rustls::DistinguishedName;
 use ::rustls::RootCertStore;
 use ::rustls::SupportedCipherSuite;
-use aws_lc_rs::cipher::DecryptionContext;
-use aws_lc_rs::cipher::PaddedBlockDecryptingKey;
-use aws_lc_rs::cipher::PaddedBlockEncryptingKey;
-use aws_lc_rs::cipher::UnboundCipherKey;
-use aws_lc_rs::cipher::AES_128;
-use aws_lc_rs::cipher::AES_CBC_IV_LEN;
-use aws_lc_rs::hmac;
-use aws_lc_rs::iv;
-use aws_lc_rs::rand;
-use aws_lc_rs::signature;
 
 use crate::crypto;
 use crate::packet;
@@ -93,7 +84,7 @@ impl Context {
         keep_crypto_symbols_live();
 
         Ok(Context {
-            provider: Arc::new(rustls_aws_lc_rs::DEFAULT_TLS13_PROVIDER),
+            provider: crypto::default_provider()?,
             certificate_identity: None,
             private_key: None,
             root_store: RootCertStore::empty(),
@@ -506,6 +497,7 @@ impl Handshake {
                             Arc::new(verifier),
                             self.signature_scheme.clone(),
                             root_store,
+                            Arc::clone(&self.provider),
                         ),
                     ))
             },
@@ -720,13 +712,13 @@ impl Handshake {
 
     fn flush_handshake_data(&mut self, ex_data: &mut ExData) -> Result<()> {
         self.connection()?;
-        self.install_zero_rtt_keys(ex_data);
+        self.install_zero_rtt_keys(ex_data)?;
 
         loop {
             let mut buf = Vec::new();
             let mut key_change = self.connection()?.write_hs(&mut buf);
             let mut consumed_key_change = false;
-            self.install_zero_rtt_keys(ex_data);
+            self.install_zero_rtt_keys(ex_data)?;
 
             if matches!(
                 key_change,
@@ -734,6 +726,7 @@ impl Handshake {
             ) && self.write_level == crypto::Level::Initial &&
                 !ex_data.is_server
             {
+                let alg = self.cipher().ok_or(Error::TlsFail)?;
                 let Some(::rustls::quic::KeyChange::Handshake { keys }) =
                     key_change.take()
                 else {
@@ -741,9 +734,9 @@ impl Handshake {
                 };
 
                 ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_open =
-                    Some(crypto::Open::from_rustls(keys.remote, None));
+                    Some(crypto::Open::from_rustls(keys.remote, alg, None));
                 ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_seal =
-                    Some(crypto::Seal::from_rustls(keys.local, None));
+                    Some(crypto::Seal::from_rustls(keys.local, alg, None));
 
                 self.write_level = crypto::Level::Handshake;
                 consumed_key_change = true;
@@ -772,22 +765,29 @@ impl Handshake {
 
             match key_change {
                 Some(::rustls::quic::KeyChange::Handshake { keys }) => {
+                    let alg = self.cipher().ok_or(Error::TlsFail)?;
                     ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_open =
-                        Some(crypto::Open::from_rustls(keys.remote, None));
+                        Some(crypto::Open::from_rustls(keys.remote, alg, None));
                     ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_seal =
-                        Some(crypto::Seal::from_rustls(keys.local, None));
+                        Some(crypto::Seal::from_rustls(keys.local, alg, None));
 
                     self.write_level = crypto::Level::Handshake;
                 },
 
                 Some(::rustls::quic::KeyChange::OneRtt { keys, next }) => {
+                    let alg = self.cipher().ok_or(Error::TlsFail)?;
                     ex_data.crypto_ctx[packet::Epoch::Application].crypto_open =
                         Some(crypto::Open::from_rustls(
                             keys.remote,
+                            alg,
                             Some(next.clone()),
                         ));
                     ex_data.crypto_ctx[packet::Epoch::Application].crypto_seal =
-                        Some(crypto::Seal::from_rustls(keys.local, Some(next)));
+                        Some(crypto::Seal::from_rustls(
+                            keys.local,
+                            alg,
+                            Some(next),
+                        ));
 
                     self.write_level = crypto::Level::OneRTT;
                     if !ex_data.is_server {
@@ -804,28 +804,32 @@ impl Handshake {
         Ok(())
     }
 
-    fn install_zero_rtt_keys(&mut self, ex_data: &mut ExData) {
+    fn install_zero_rtt_keys(&mut self, ex_data: &mut ExData) -> Result<()> {
         let Some(keys) = self.conn.as_ref().and_then(|conn| conn.zero_rtt_keys())
         else {
-            return;
+            return Ok(());
         };
+        let alg = self.cipher().ok_or(Error::TlsFail)?;
 
         let app_crypto = &mut ex_data.crypto_ctx[packet::Epoch::Application];
 
         if ex_data.is_server {
             if app_crypto.crypto_0rtt_open.is_none() {
                 app_crypto.crypto_0rtt_open =
-                    Some(crypto::Open::from_rustls(keys, None));
+                    Some(crypto::Open::from_rustls(keys, alg, None));
             }
             self.early_data_active = true;
 
-            return;
+            return Ok(());
         }
 
         if app_crypto.crypto_seal.is_none() {
-            app_crypto.crypto_seal = Some(crypto::Seal::from_rustls(keys, None));
+            app_crypto.crypto_seal =
+                Some(crypto::Seal::from_rustls(keys, alg, None));
             self.early_data_active = true;
         }
+
+        Ok(())
     }
 }
 
@@ -1084,8 +1088,8 @@ fn valid_at(
 }
 
 fn legacy_v1_server_identity_valid(
-    root_store: &RootCertStore, identity: &Identity<'_>,
-    server_name: &::rustls::pki_types::ServerName<'_>,
+    provider: &::rustls::crypto::CryptoProvider, root_store: &RootCertStore,
+    identity: &Identity<'_>, server_name: &::rustls::pki_types::ServerName<'_>,
     now: ::rustls::pki_types::UnixTime,
 ) -> bool {
     let Identity::X509(certificates) = identity else {
@@ -1118,12 +1122,13 @@ fn legacy_v1_server_identity_valid(
         }
 
         let public_key = der_sequence(root.subject_public_key_info.as_ref());
-        signature::UnparsedPublicKey::new(
-            &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
-            public_key,
+        legacy_signature_valid(
+            provider,
+            &public_key,
+            cert.signature_algorithm,
+            cert.tbs,
+            cert.signature,
         )
-        .verify(cert.tbs, cert.signature)
-        .is_ok()
     })
 }
 
@@ -1138,45 +1143,39 @@ fn legacy_sha256_rsa_signature_algorithm(algorithm: &[u8]) -> bool {
 
 fn legacy_handshake_signature_algorithm(
     scheme: SignatureScheme,
-) -> Option<&'static dyn signature::VerificationAlgorithm> {
+) -> Option<&'static [u8]> {
     Some(match scheme {
-        SignatureScheme::RSA_PKCS1_SHA1 =>
-            &signature::RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY,
+        SignatureScheme::RSA_PKCS1_SHA1 => RSA_PKCS1_SHA1_ALG_ID,
 
-        SignatureScheme::RSA_PKCS1_SHA256 =>
-            &signature::RSA_PKCS1_2048_8192_SHA256,
+        SignatureScheme::RSA_PKCS1_SHA256 => alg_id::RSA_PKCS1_SHA256.as_ref(),
 
-        SignatureScheme::RSA_PKCS1_SHA384 =>
-            &signature::RSA_PKCS1_2048_8192_SHA384,
+        SignatureScheme::RSA_PKCS1_SHA384 => alg_id::RSA_PKCS1_SHA384.as_ref(),
 
-        SignatureScheme::RSA_PKCS1_SHA512 =>
-            &signature::RSA_PKCS1_2048_8192_SHA512,
+        SignatureScheme::RSA_PKCS1_SHA512 => alg_id::RSA_PKCS1_SHA512.as_ref(),
 
-        SignatureScheme::RSA_PSS_SHA256 => &signature::RSA_PSS_2048_8192_SHA256,
+        SignatureScheme::RSA_PSS_SHA256 => alg_id::RSA_PSS_SHA256.as_ref(),
 
-        SignatureScheme::RSA_PSS_SHA384 => &signature::RSA_PSS_2048_8192_SHA384,
+        SignatureScheme::RSA_PSS_SHA384 => alg_id::RSA_PSS_SHA384.as_ref(),
 
-        SignatureScheme::RSA_PSS_SHA512 => &signature::RSA_PSS_2048_8192_SHA512,
+        SignatureScheme::RSA_PSS_SHA512 => alg_id::RSA_PSS_SHA512.as_ref(),
 
-        SignatureScheme::ECDSA_NISTP256_SHA256 =>
-            &signature::ECDSA_P256_SHA256_ASN1,
+        SignatureScheme::ECDSA_NISTP256_SHA256 => alg_id::ECDSA_SHA256.as_ref(),
 
-        SignatureScheme::ECDSA_NISTP384_SHA384 =>
-            &signature::ECDSA_P384_SHA384_ASN1,
+        SignatureScheme::ECDSA_NISTP384_SHA384 => alg_id::ECDSA_SHA384.as_ref(),
 
-        SignatureScheme::ECDSA_NISTP521_SHA512 =>
-            &signature::ECDSA_P521_SHA512_ASN1,
+        SignatureScheme::ECDSA_NISTP521_SHA512 => alg_id::ECDSA_SHA512.as_ref(),
 
-        SignatureScheme::ED25519 => &signature::ED25519,
+        SignatureScheme::ED25519 => alg_id::ED25519.as_ref(),
 
         _ => return None,
     })
 }
 
 fn legacy_handshake_signature_valid(
+    provider: &::rustls::crypto::CryptoProvider,
     input: &::rustls::client::danger::SignatureVerificationInput,
 ) -> bool {
-    let Some(algorithm) =
+    let Some(signature_algorithm) =
         legacy_handshake_signature_algorithm(input.signature.scheme)
     else {
         return false;
@@ -1198,10 +1197,62 @@ fn legacy_handshake_signature_valid(
         return false;
     };
 
-    signature::UnparsedPublicKey::new(algorithm, public_key)
-        .verify(input.message, input.signature.signature())
-        .is_ok()
+    legacy_signature_valid(
+        provider,
+        public_key,
+        signature_algorithm,
+        input.message,
+        input.signature.signature(),
+    )
 }
+
+fn legacy_signature_valid(
+    provider: &::rustls::crypto::CryptoProvider, public_key_spki: &[u8],
+    signature_algorithm: &[u8], message: &[u8], signature: &[u8],
+) -> bool {
+    let Some((public_key_algorithm, public_key)) =
+        subject_public_key(public_key_spki)
+    else {
+        return false;
+    };
+
+    provider
+        .signature_verification_algorithms
+        .all
+        .iter()
+        .any(|algorithm| {
+            algorithm.public_key_alg_id().as_ref() == public_key_algorithm &&
+                algorithm.signature_alg_id().as_ref() == signature_algorithm &&
+                algorithm
+                    .verify_signature(public_key, message, signature)
+                    .is_ok()
+        })
+}
+
+fn subject_public_key(spki: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut spki = DerReader::new(spki);
+    let Some((0x30, spki, _)) = spki.next_raw().flatten() else {
+        return None;
+    };
+
+    let mut spki = DerReader::new(spki);
+    let Some((0x30, algorithm, _)) = spki.next_raw().flatten() else {
+        return None;
+    };
+    let Some((0x03, subject_public_key)) = spki.next().flatten() else {
+        return None;
+    };
+    let [0, subject_public_key @ ..] = subject_public_key else {
+        return None;
+    };
+
+    Some((algorithm, subject_public_key))
+}
+
+const RSA_PKCS1_SHA1_ALG_ID: &[u8] = &[
+    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05,
+    0x05, 0x00,
+];
 
 fn der_time(tag: u8, value: &[u8]) -> Option<u64> {
     let (year, value) = match (tag, value.len()) {
@@ -1656,7 +1707,7 @@ fn register_rustls_session(
     key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
 ) -> Option<RustlsSessionToken> {
     let mut token = [0; RUSTLS_SESSION_TOKEN_LEN];
-    rand::fill(&mut token).ok()?;
+    crypto::fill_random(&mut token).ok()?;
 
     let mut registry = rustls_session_registry().lock().ok()?;
     if registry.len() >= MAX_RUSTLS_SESSIONS {
@@ -1683,15 +1734,14 @@ fn encode_quiche_session(session: &[u8], peer_params: &[u8]) -> Vec<u8> {
 
 const TICKET_KEY_LEN: usize = 48;
 const TICKET_KEY_NAME_LEN: usize = 16;
-const TICKET_HMAC_KEY_LEN: usize = 16;
+const TICKET_NONCE_LEN: usize = 8;
 const TICKET_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_TICKET_CIPHERTEXT_LEN: usize = u16::MAX as usize;
 
 struct QuicheTicketProducer {
     key_name: [u8; TICKET_KEY_NAME_LEN],
-    hmac_key: hmac::Key,
-    aes_encrypt_key: PaddedBlockEncryptingKey,
-    aes_decrypt_key: PaddedBlockDecryptingKey,
+    open_key: crypto::PacketKey,
+    seal_key: crypto::PacketKey,
 }
 
 impl QuicheTicketProducer {
@@ -1702,59 +1752,61 @@ impl QuicheTicketProducer {
 
         let mut key_name = [0; TICKET_KEY_NAME_LEN];
         key_name.copy_from_slice(&key[..TICKET_KEY_NAME_LEN]);
-        let hmac_key = hmac::Key::new(
-            hmac::HMAC_SHA256,
-            &key[TICKET_KEY_NAME_LEN..TICKET_KEY_NAME_LEN + TICKET_HMAC_KEY_LEN],
-        );
-        let aes_key = &key[TICKET_KEY_NAME_LEN + TICKET_HMAC_KEY_LEN..];
-
-        let aes_encrypt_key = UnboundCipherKey::new(&AES_128, aes_key)
-            .map_err(|_| Error::TlsFail)?;
-        let aes_encrypt_key =
-            PaddedBlockEncryptingKey::cbc_pkcs7(aes_encrypt_key)
-                .map_err(|_| Error::TlsFail)?;
-        let aes_decrypt_key = UnboundCipherKey::new(&AES_128, aes_key)
-            .map_err(|_| Error::TlsFail)?;
-        let aes_decrypt_key =
-            PaddedBlockDecryptingKey::cbc_pkcs7(aes_decrypt_key)
-                .map_err(|_| Error::TlsFail)?;
+        let secret = &key[TICKET_KEY_NAME_LEN..];
+        let open_key = crypto::PacketKey::from_secret(
+            crypto::Algorithm::AES128_GCM,
+            secret,
+            crypto::Open::DECRYPT,
+        )
+        .map_err(|_| Error::TlsFail)?;
+        let seal_key = crypto::PacketKey::from_secret(
+            crypto::Algorithm::AES128_GCM,
+            secret,
+            crypto::Seal::ENCRYPT,
+        )
+        .map_err(|_| Error::TlsFail)?;
 
         Ok(Self {
             key_name,
-            hmac_key,
-            aes_encrypt_key,
-            aes_decrypt_key,
+            open_key,
+            seal_key,
         })
     }
 }
 
 impl TicketProducer for QuicheTicketProducer {
     fn encrypt(&self, message: &[u8]) -> Option<Vec<u8>> {
-        let mut encrypted_state = Vec::from(message);
-        let dec_ctx = self.aes_encrypt_key.encrypt(&mut encrypted_state).ok()?;
-        let iv: &[u8] = (&dec_ctx).try_into().ok()?;
+        let mut nonce = [0; TICKET_NONCE_LEN];
+        crypto::fill_random(&mut nonce).ok()?;
+        let counter = u64::from_be_bytes(nonce);
 
-        let mut hmac_data = Vec::with_capacity(
-            self.key_name.len() + iv.len() + 2 + encrypted_state.len(),
-        );
-        hmac_data.extend_from_slice(&self.key_name);
-        hmac_data.extend_from_slice(iv);
-        hmac_data.extend_from_slice(
-            &u16::try_from(encrypted_state.len()).ok()?.to_be_bytes(),
-        );
-        hmac_data.extend_from_slice(&encrypted_state);
-        let tag = hmac::sign(&self.hmac_key, &hmac_data);
+        let mut aad = Vec::with_capacity(self.key_name.len() + nonce.len());
+        aad.extend_from_slice(&self.key_name);
+        aad.extend_from_slice(&nonce);
+
+        let tag_len = crypto::Algorithm::AES128_GCM.tag_len();
+        let mut encrypted_state = Vec::with_capacity(message.len() + tag_len);
+        encrypted_state.extend_from_slice(message);
+        encrypted_state.resize(message.len() + tag_len, 0);
+
+        let out_len = self
+            .seal_key
+            .seal_with_u64_counter(
+                counter,
+                &aad,
+                &mut encrypted_state,
+                message.len(),
+                None,
+            )
+            .ok()?;
+        encrypted_state.truncate(out_len);
 
         let mut ciphertext = Vec::with_capacity(
-            self.key_name.len() +
-                iv.len() +
-                encrypted_state.len() +
-                tag.as_ref().len(),
+            self.key_name.len() + nonce.len() + encrypted_state.len(),
         );
         ciphertext.extend_from_slice(&self.key_name);
-        ciphertext.extend_from_slice(iv);
+        ciphertext.extend_from_slice(&nonce);
         ciphertext.extend_from_slice(&encrypted_state);
-        ciphertext.extend_from_slice(tag.as_ref());
 
         Some(ciphertext)
     }
@@ -1770,31 +1822,22 @@ impl TicketProducer for QuicheTicketProducer {
             return None;
         }
 
-        let (iv, ciphertext) = ciphertext.split_at_checked(AES_CBC_IV_LEN)?;
-        let tag_len = self.hmac_key.algorithm().digest_algorithm().output_len();
-        let encrypted_len = ciphertext.len().checked_sub(tag_len)?;
-        let (encrypted_state, tag) =
-            ciphertext.split_at_checked(encrypted_len)?;
+        let (nonce, encrypted_state) =
+            ciphertext.split_at_checked(TICKET_NONCE_LEN)?;
+        let counter = u64::from_be_bytes(nonce.try_into().ok()?);
 
-        let mut hmac_data = Vec::with_capacity(
-            key_name.len() + iv.len() + 2 + encrypted_state.len(),
-        );
-        hmac_data.extend_from_slice(key_name);
-        hmac_data.extend_from_slice(iv);
-        hmac_data.extend_from_slice(
-            &u16::try_from(encrypted_state.len()).ok()?.to_be_bytes(),
-        );
-        hmac_data.extend_from_slice(encrypted_state);
-        hmac::verify(&self.hmac_key, &hmac_data, tag).ok()?;
+        let mut aad = Vec::with_capacity(key_name.len() + nonce.len());
+        aad.extend_from_slice(key_name);
+        aad.extend_from_slice(nonce);
 
-        let iv = iv::FixedLength::try_from(iv).ok()?;
-        let mut out = Vec::from(encrypted_state);
-        let plaintext = self
-            .aes_decrypt_key
-            .decrypt(&mut out, DecryptionContext::Iv128(iv))
+        let mut plaintext = Vec::from(encrypted_state);
+        let out_len = self
+            .open_key
+            .open_with_u64_counter(counter, &aad, &mut plaintext)
             .ok()?;
+        plaintext.truncate(out_len);
 
-        Some(plaintext.into())
+        Some(plaintext)
     }
 
     fn lifetime(&self) -> Duration {
@@ -1870,6 +1913,7 @@ struct RecordingServerVerifier {
     inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
     signature_scheme: RecordedSignatureScheme,
     root_store: Arc<RootCertStore>,
+    provider: Arc<::rustls::crypto::CryptoProvider>,
 }
 
 impl RecordingServerVerifier {
@@ -1877,11 +1921,13 @@ impl RecordingServerVerifier {
         inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
         signature_scheme: RecordedSignatureScheme,
         root_store: Arc<RootCertStore>,
+        provider: Arc<::rustls::crypto::CryptoProvider>,
     ) -> Self {
         Self {
             inner,
             signature_scheme,
             root_store,
+            provider,
         }
     }
 
@@ -1914,6 +1960,7 @@ impl RecordingServerVerifier {
         &self, identity: &::rustls::client::danger::ServerIdentity,
     ) -> bool {
         legacy_v1_server_identity_valid(
+            &self.provider,
             &self.root_store,
             identity.identity,
             identity.server_name,
@@ -1929,7 +1976,7 @@ impl RecordingServerVerifier {
         ::rustls::Error,
     > {
         if unsupported_cert_version_error(&error) &&
-            legacy_handshake_signature_valid(input)
+            legacy_handshake_signature_valid(&self.provider, input)
         {
             record_signature_scheme(&self.signature_scheme, input);
 
@@ -2476,12 +2523,13 @@ mod tests {
         ));
         assert!(ctx.root_store.roots.iter().any(|root| {
             let public_key = der_sequence(root.subject_public_key_info.as_ref());
-            signature::UnparsedPublicKey::new(
-                &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
-                public_key,
+            legacy_signature_valid(
+                &ctx.provider,
+                &public_key,
+                legacy.signature_algorithm,
+                legacy.tbs,
+                legacy.signature,
             )
-            .verify(legacy.tbs, legacy.signature)
-            .is_ok()
         }));
 
         let identity =
@@ -2490,6 +2538,7 @@ mod tests {
             ::rustls::pki_types::ServerName::try_from("quic.tech").unwrap();
 
         assert!(legacy_v1_server_identity_valid(
+            &ctx.provider,
             &ctx.root_store,
             &identity,
             &server_name,
@@ -2499,8 +2548,9 @@ mod tests {
 
     #[test]
     fn empty_root_client_verifier_requests_optional_auth() {
+        let provider = crypto::default_provider().unwrap();
         let verifier = RecordingClientVerifier::without_roots(
-            &rustls_aws_lc_rs::DEFAULT_TLS13_PROVIDER,
+            &provider,
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(None)),
         );

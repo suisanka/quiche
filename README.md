@@ -328,8 +328,10 @@ cargo can also be used to run the testsuite:
  $ cargo test
 ```
 
-By default quiche uses [rustls] with the [aws-lc-rs] crypto provider for
-QUIC's cryptographic handshake based on TLS.
+quiche uses [rustls] with rustls' crypto provider API for QUIC's
+cryptographic handshake based on TLS. By default, quiche enables
+`rustls-aws-lc-rs` as a fallback provider when the application has not
+installed a process-default provider.
 [aws-lc-rs]: https://crates.io/crates/aws-lc-rs
 [rustls]: https://crates.io/crates/rustls
 

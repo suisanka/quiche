@@ -13,8 +13,13 @@ rust-version = "1.88"
 [features]
 default = ["rustls-aws-lc-rs", "qlog-gzip", "qlog-zstd"]
 
-# Use rustls with the aws-lc-rs crypto provider.
+# Use rustls with an application-installed crypto provider.
+rustls = ["quiche/rustls"]
+
+# Use rustls with the aws-lc-rs crypto provider as the fallback provider.
 rustls-aws-lc-rs = [
+  "rustls",
+  "dep:rustls-aws-lc-rs",
   "h3i/rustls-aws-lc-rs",
   "quiche/rustls-aws-lc-rs",
 ]
@@ -28,7 +33,7 @@ quiche_internal = ["quiche/internal"]
 perf-quic-listener-metrics = []
 
 # Enable raw public key (RPK) support for QUIC handshakes.
-rpk = ["rustls-aws-lc-rs"]
+rpk = ["rustls"]
 
 # Replaces quiche's original congestion control
 # implementation with one adapted from google/quiche.
@@ -74,7 +79,6 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
 bytes = { workspace = true }
 crossbeam = { workspace = true, default-features = false }
 datagram-socket = { workspace = true }
@@ -89,6 +93,8 @@ octets = { workspace = true }
 pin-project = { workspace = true }
 qlog = { workspace = true, features = ["foundations"] }
 quiche = { workspace = true, features = ["qlog"] }
+rustls = { workspace = true }
+rustls-aws-lc-rs = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_with = { workspace = true }
 slog-scope = { workspace = true }

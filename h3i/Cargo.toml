@@ -19,8 +19,15 @@ workspace = true
 [features]
 default = ["rustls-aws-lc-rs"]
 
-# Use rustls with the aws-lc-rs crypto provider.
+# Use rustls with an application-installed crypto provider.
+rustls = [
+  "quiche/rustls",
+  "tokio-quiche?/rustls",
+]
+
+# Use rustls with the aws-lc-rs crypto provider as the fallback provider.
 rustls-aws-lc-rs = [
+  "rustls",
   "quiche/rustls-aws-lc-rs",
   "tokio-quiche?/rustls-aws-lc-rs",
 ]

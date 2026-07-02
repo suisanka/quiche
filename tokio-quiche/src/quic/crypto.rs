@@ -24,23 +24,54 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::sync::Arc;
+
+use rustls::crypto::tls13::OkmBlock;
+use rustls::crypto::CipherSuite;
+use rustls::crypto::CryptoProvider;
+
 pub(crate) fn rand_bytes(buf: &mut [u8]) {
-    use aws_lc_rs::rand::SecureRandom;
-
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-
-    rng.fill(buf)
+    default_provider()
+        .secure_random
+        .fill(buf)
         .expect("failed to generate secure random bytes");
 }
 
 pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, key);
-    let tag = aws_lc_rs::hmac::sign(&key, data);
+    assert!(key.len() <= OkmBlock::MAX_LEN);
+
+    let provider = default_provider();
+    let suite = provider
+        .tls13_cipher_suites
+        .iter()
+        .copied()
+        .find(|suite| suite.common.suite == CipherSuite::TLS13_AES_128_GCM_SHA256)
+        .expect("rustls provider must support TLS_AES_128_GCM_SHA256");
+    let key = OkmBlock::new(key);
+    let tag = suite.hkdf_provider.hmac_sign(&key, data);
     let mut out = [0; 32];
     out.copy_from_slice(tag.as_ref());
     out
 }
 
 pub(crate) fn verify_slices_are_equal(a: &[u8], b: &[u8]) -> bool {
-    aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter().zip(b).fold(0, |acc, (&a, &b)| acc | (a ^ b)) == 0
+}
+
+fn default_provider() -> Arc<CryptoProvider> {
+    if let Some(provider) = CryptoProvider::get_default() {
+        return Arc::clone(provider);
+    }
+
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    {
+        return Arc::new(rustls_aws_lc_rs::DEFAULT_TLS13_PROVIDER);
+    }
+
+    #[cfg(not(feature = "rustls-aws-lc-rs"))]
+    panic!("rustls crypto provider must be installed before using tokio-quiche")
 }

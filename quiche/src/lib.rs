@@ -357,8 +357,10 @@
 //! quiche defines a number of [feature flags] to reduce the amount of compiled
 //! code and dependencies:
 //!
+//! * `rustls`: Use rustls with the process-default crypto provider.
+//!
 //! * `rustls-aws-lc-rs` (default): Use rustls with the aws-lc-rs crypto
-//!   provider.
+//!   provider as the fallback when no process-default provider is installed.
 //!
 //! * `pkg-config-meta`: Generate pkg-config metadata file for libquiche.
 //!
@@ -696,8 +698,8 @@ impl Config {
     /// config.load_raw_public_key_from_der_file("/path/to/public_key.der")?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
-    #[cfg(feature = "rustls-aws-lc-rs")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-aws-lc-rs")))]
+    #[cfg(feature = "rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls")))]
     pub fn load_raw_public_key_from_der_file(
         &mut self, file: &str,
     ) -> Result<()> {

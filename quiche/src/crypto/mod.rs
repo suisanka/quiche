@@ -89,6 +89,7 @@ impl Algorithm {
         }
     }
 
+    #[cfg(test)]
     pub const fn nonce_len(self) -> usize {
         match self {
             Algorithm::AES128_GCM => 12,
@@ -98,49 +99,27 @@ impl Algorithm {
     }
 }
 
+#[cfg(test)]
 type HeaderProtectionMask = [u8; HP_MASK_LEN];
 
 pub struct Open {
     alg: Algorithm,
 
+    #[cfg(test)]
     secret: Vec<u8>,
 
     header: HeaderProtection,
 
     packet: OpenPacketKey,
 
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     next: Option<::rustls::quic::Secrets>,
 }
 
 impl Open {
     pub const DECRYPT: u32 = 0;
 
-    pub fn new(
-        alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, hp_key: Vec<u8>,
-        secret: Vec<u8>,
-    ) -> Result<Open> {
-        Ok(Open {
-            alg,
-
-            secret,
-
-            header: HeaderProtection::Native(HeaderProtectionKey::new(
-                alg, hp_key,
-            )?),
-
-            packet: OpenPacketKey::Native(PacketKey::new(
-                alg,
-                key,
-                iv,
-                Self::DECRYPT,
-            )?),
-
-            #[cfg(feature = "rustls-aws-lc-rs")]
-            next: None,
-        })
-    }
-
+    #[cfg(test)]
     pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Open> {
         Ok(Open {
             alg: aead,
@@ -157,19 +136,20 @@ impl Open {
                 Self::DECRYPT,
             )?),
 
-            #[cfg(feature = "rustls-aws-lc-rs")]
+            #[cfg(feature = "rustls")]
             next: None,
         })
     }
 
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     pub fn from_rustls(
-        keys: ::rustls::quic::DirectionalKeys,
+        keys: ::rustls::quic::DirectionalKeys, alg: Algorithm,
         next: Option<::rustls::quic::Secrets>,
     ) -> Open {
         Open {
-            alg: Algorithm::AES128_GCM,
+            alg,
 
+            #[cfg(test)]
             secret: Vec::new(),
 
             header: HeaderProtection::Rustls(keys.header.into()),
@@ -193,13 +173,14 @@ impl Open {
     }
 
     pub fn derive_next_packet_key(&self) -> Result<Open> {
-        #[cfg(feature = "rustls-aws-lc-rs")]
+        #[cfg(feature = "rustls")]
         if let Some(mut next) = self.next.clone() {
             let keys = next.next_packet_keys();
 
             return Ok(Open {
                 alg: self.alg,
 
+                #[cfg(test)]
                 secret: Vec::new(),
 
                 header: self.header.clone(),
@@ -210,28 +191,34 @@ impl Open {
             });
         }
 
-        #[cfg(feature = "rustls-aws-lc-rs")]
+        #[cfg(feature = "rustls")]
         if self.packet.is_rustls() {
             return Err(Error::CryptoFail);
         }
 
-        let next_secret = derive_next_secret(self.alg, &self.secret)?;
+        #[cfg(test)]
+        {
+            let next_secret = derive_next_secret(self.alg, &self.secret)?;
 
-        let next_packet_key =
-            PacketKey::from_secret(self.alg, &next_secret, Self::DECRYPT)?;
+            let next_packet_key =
+                PacketKey::from_secret(self.alg, &next_secret, Self::DECRYPT)?;
 
-        Ok(Open {
-            alg: self.alg,
+            return Ok(Open {
+                alg: self.alg,
 
-            secret: next_secret,
+                secret: next_secret,
 
-            header: self.header.clone(),
+                header: self.header.clone(),
 
-            packet: OpenPacketKey::Native(next_packet_key),
+                packet: OpenPacketKey::Native(next_packet_key),
 
-            #[cfg(feature = "rustls-aws-lc-rs")]
-            next: None,
-        })
+                #[cfg(feature = "rustls")]
+                next: None,
+            });
+        }
+
+        #[cfg(not(test))]
+        Err(Error::CryptoFail)
     }
 
     pub fn open_with_u64_counter(
@@ -256,44 +243,21 @@ impl Open {
 pub struct Seal {
     alg: Algorithm,
 
+    #[cfg(test)]
     secret: Vec<u8>,
 
     header: HeaderProtection,
 
     packet: SealPacketKey,
 
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     next: Option<::rustls::quic::Secrets>,
 }
 
 impl Seal {
     pub const ENCRYPT: u32 = 1;
 
-    pub fn new(
-        alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, hp_key: Vec<u8>,
-        secret: Vec<u8>,
-    ) -> Result<Seal> {
-        Ok(Seal {
-            alg,
-
-            secret,
-
-            header: HeaderProtection::Native(HeaderProtectionKey::new(
-                alg, hp_key,
-            )?),
-
-            packet: SealPacketKey::Native(PacketKey::new(
-                alg,
-                key,
-                iv,
-                Self::ENCRYPT,
-            )?),
-
-            #[cfg(feature = "rustls-aws-lc-rs")]
-            next: None,
-        })
-    }
-
+    #[cfg(test)]
     pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Seal> {
         Ok(Seal {
             alg: aead,
@@ -310,19 +274,20 @@ impl Seal {
                 Self::ENCRYPT,
             )?),
 
-            #[cfg(feature = "rustls-aws-lc-rs")]
+            #[cfg(feature = "rustls")]
             next: None,
         })
     }
 
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     pub fn from_rustls(
-        keys: ::rustls::quic::DirectionalKeys,
+        keys: ::rustls::quic::DirectionalKeys, alg: Algorithm,
         next: Option<::rustls::quic::Secrets>,
     ) -> Seal {
         Seal {
-            alg: Algorithm::AES128_GCM,
+            alg,
 
+            #[cfg(test)]
             secret: Vec::new(),
 
             header: HeaderProtection::Rustls(keys.header.into()),
@@ -346,13 +311,14 @@ impl Seal {
     }
 
     pub fn derive_next_packet_key(&self) -> Result<Seal> {
-        #[cfg(feature = "rustls-aws-lc-rs")]
+        #[cfg(feature = "rustls")]
         if let Some(mut next) = self.next.clone() {
             let keys = next.next_packet_keys();
 
             return Ok(Seal {
                 alg: self.alg,
 
+                #[cfg(test)]
                 secret: Vec::new(),
 
                 header: self.header.clone(),
@@ -363,28 +329,34 @@ impl Seal {
             });
         }
 
-        #[cfg(feature = "rustls-aws-lc-rs")]
+        #[cfg(feature = "rustls")]
         if self.packet.is_rustls() {
             return Err(Error::CryptoFail);
         }
 
-        let next_secret = derive_next_secret(self.alg, &self.secret)?;
+        #[cfg(test)]
+        {
+            let next_secret = derive_next_secret(self.alg, &self.secret)?;
 
-        let next_packet_key =
-            PacketKey::from_secret(self.alg, &next_secret, Self::ENCRYPT)?;
+            let next_packet_key =
+                PacketKey::from_secret(self.alg, &next_secret, Self::ENCRYPT)?;
 
-        Ok(Seal {
-            alg: self.alg,
+            return Ok(Seal {
+                alg: self.alg,
 
-            secret: next_secret,
+                secret: next_secret,
 
-            header: self.header.clone(),
+                header: self.header.clone(),
 
-            packet: SealPacketKey::Native(next_packet_key),
+                packet: SealPacketKey::Native(next_packet_key),
 
-            #[cfg(feature = "rustls-aws-lc-rs")]
-            next: None,
-        })
+                #[cfg(feature = "rustls")]
+                next: None,
+            });
+        }
+
+        #[cfg(not(test))]
+        Err(Error::CryptoFail)
     }
 
     pub fn seal_with_u64_counter(
@@ -413,6 +385,7 @@ impl Seal {
     }
 }
 
+#[cfg(test)]
 impl HeaderProtectionKey {
     pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Self> {
         let key_len = aead.key_len();
@@ -427,18 +400,20 @@ impl HeaderProtectionKey {
 
 #[derive(Clone)]
 enum HeaderProtection {
+    #[cfg(test)]
     Native(HeaderProtectionKey),
 
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     Rustls(std::sync::Arc<dyn ::rustls::quic::HeaderProtectionKey>),
 }
 
 impl HeaderProtection {
     fn new_mask(&self, sample: &[u8]) -> Result<[u8; HP_MASK_LEN]> {
         match self {
+            #[cfg(test)]
             HeaderProtection::Native(key) => key.new_mask(sample),
 
-            #[cfg(feature = "rustls-aws-lc-rs")]
+            #[cfg(feature = "rustls")]
             HeaderProtection::Rustls(key) => {
                 let mut first = 0x03;
                 let mut packet_number = [0; 4];
@@ -457,14 +432,15 @@ impl HeaderProtection {
 }
 
 enum OpenPacketKey {
+    #[cfg(test)]
     Native(PacketKey),
 
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     Rustls(Box<dyn ::rustls::quic::PacketKey>),
 }
 
 impl OpenPacketKey {
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     fn is_rustls(&self) -> bool {
         matches!(self, OpenPacketKey::Rustls(_))
     }
@@ -473,10 +449,11 @@ impl OpenPacketKey {
         &self, counter: u64, ad: &[u8], buf: &mut [u8],
     ) -> Result<usize> {
         match self {
+            #[cfg(test)]
             OpenPacketKey::Native(key) =>
                 key.open_with_u64_counter(counter, ad, buf),
 
-            #[cfg(feature = "rustls-aws-lc-rs")]
+            #[cfg(feature = "rustls")]
             OpenPacketKey::Rustls(key) => key
                 .decrypt_in_place(counter, ad, buf, None)
                 .map(|plaintext| plaintext.len())
@@ -486,14 +463,15 @@ impl OpenPacketKey {
 }
 
 enum SealPacketKey {
+    #[cfg(test)]
     Native(PacketKey),
 
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     Rustls(Box<dyn ::rustls::quic::PacketKey>),
 }
 
 impl SealPacketKey {
-    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg(feature = "rustls")]
     fn is_rustls(&self) -> bool {
         matches!(self, SealPacketKey::Rustls(_))
     }
@@ -503,10 +481,11 @@ impl SealPacketKey {
         extra_in: Option<&[u8]>,
     ) -> Result<usize> {
         match self {
+            #[cfg(test)]
             SealPacketKey::Native(key) =>
                 key.seal_with_u64_counter(counter, ad, buf, in_len, extra_in),
 
-            #[cfg(feature = "rustls-aws-lc-rs")]
+            #[cfg(feature = "rustls")]
             SealPacketKey::Rustls(key) => {
                 let tag_len = key.tag_len();
                 let extra_len = extra_in.map_or(0, <[u8]>::len);
@@ -541,74 +520,16 @@ impl SealPacketKey {
 pub fn derive_initial_key_material(
     cid: &[u8], version: u32, is_server: bool, did_reset: bool,
 ) -> Result<(Open, Seal)> {
-    let mut initial_secret = [0; 32];
-    let mut client_secret = vec![0; 32];
-    let mut server_secret = vec![0; 32];
+    let _ = did_reset;
+    let keys = initial_keys(cid, version, is_server)?;
 
-    let aead = Algorithm::AES128_GCM;
-
-    let key_len = aead.key_len();
-    let nonce_len = aead.nonce_len();
-
-    derive_initial_secret(cid, version, &mut initial_secret)?;
-
-    derive_client_initial_secret(aead, &initial_secret, &mut client_secret)?;
-
-    derive_server_initial_secret(aead, &initial_secret, &mut server_secret)?;
-
-    // When the initial key material has been reset (e.g. due to retry or
-    // version negotiation), we need to prime the AEAD context as well, as the
-    // following packet will not start from 0 again. This is done through the
-    // `Open/Seal::from_secret()` path, rather than `Open/Seal::new()`.
-    if did_reset {
-        let (open, seal) = if is_server {
-            (
-                Open::from_secret(aead, &client_secret)?,
-                Seal::from_secret(aead, &server_secret)?,
-            )
-        } else {
-            (
-                Open::from_secret(aead, &server_secret)?,
-                Seal::from_secret(aead, &client_secret)?,
-            )
-        };
-
-        return Ok((open, seal));
-    }
-
-    // Client.
-    let mut client_key = vec![0; key_len];
-    let mut client_iv = vec![0; nonce_len];
-    let mut client_hp_key = vec![0; key_len];
-
-    derive_pkt_key(aead, &client_secret, &mut client_key)?;
-    derive_pkt_iv(aead, &client_secret, &mut client_iv)?;
-    derive_hdr_key(aead, &client_secret, &mut client_hp_key)?;
-
-    // Server.
-    let mut server_key = vec![0; key_len];
-    let mut server_iv = vec![0; nonce_len];
-    let mut server_hp_key = vec![0; key_len];
-
-    derive_pkt_key(aead, &server_secret, &mut server_key)?;
-    derive_pkt_iv(aead, &server_secret, &mut server_iv)?;
-    derive_hdr_key(aead, &server_secret, &mut server_hp_key)?;
-
-    let (open, seal) = if is_server {
-        (
-            Open::new(aead, client_key, client_iv, client_hp_key, client_secret)?,
-            Seal::new(aead, server_key, server_iv, server_hp_key, server_secret)?,
-        )
-    } else {
-        (
-            Open::new(aead, server_key, server_iv, server_hp_key, server_secret)?,
-            Seal::new(aead, client_key, client_iv, client_hp_key, client_secret)?,
-        )
-    };
+    let open = Open::from_rustls(keys.remote, Algorithm::AES128_GCM, None);
+    let seal = Seal::from_rustls(keys.local, Algorithm::AES128_GCM, None);
 
     Ok((open, seal))
 }
 
+#[cfg(test)]
 fn derive_initial_secret(
     secret: &[u8], version: u32, out_prk: &mut [u8],
 ) -> Result<()> {
@@ -623,9 +544,17 @@ fn derive_initial_secret(
         _ => &INITIAL_SALT_V1,
     };
 
-    hkdf_extract(Algorithm::AES128_GCM, out_prk, secret, salt)
+    let prk = hmac_sha256(salt, secret)?;
+    if out_prk.len() < prk.len() {
+        return Err(Error::CryptoFail);
+    }
+
+    out_prk[..prk.len()].copy_from_slice(&prk);
+
+    Ok(())
 }
 
+#[cfg(test)]
 fn derive_client_initial_secret(
     aead: Algorithm, prk: &[u8], out: &mut [u8],
 ) -> Result<()> {
@@ -633,6 +562,7 @@ fn derive_client_initial_secret(
     hkdf_expand_label(aead, prk, LABEL, out)
 }
 
+#[cfg(test)]
 fn derive_server_initial_secret(
     aead: Algorithm, prk: &[u8], out: &mut [u8],
 ) -> Result<()> {
@@ -640,6 +570,7 @@ fn derive_server_initial_secret(
     hkdf_expand_label(aead, prk, LABEL, out)
 }
 
+#[cfg(test)]
 fn derive_next_secret(aead: Algorithm, secret: &[u8]) -> Result<Vec<u8>> {
     const LABEL: &[u8] = b"quic ku";
 
@@ -650,6 +581,7 @@ fn derive_next_secret(aead: Algorithm, secret: &[u8]) -> Result<Vec<u8>> {
     Ok(next_secret)
 }
 
+#[cfg(test)]
 pub fn derive_hdr_key(
     aead: Algorithm, secret: &[u8], out: &mut [u8],
 ) -> Result<()> {
@@ -664,6 +596,7 @@ pub fn derive_hdr_key(
     hkdf_expand_label(aead, secret, LABEL, &mut out[..key_len])
 }
 
+#[cfg(test)]
 pub fn derive_pkt_key(aead: Algorithm, prk: &[u8], out: &mut [u8]) -> Result<()> {
     const LABEL: &[u8] = b"quic key";
 
@@ -676,6 +609,7 @@ pub fn derive_pkt_key(aead: Algorithm, prk: &[u8], out: &mut [u8]) -> Result<()>
     hkdf_expand_label(aead, prk, LABEL, &mut out[..key_len])
 }
 
+#[cfg(test)]
 pub fn derive_pkt_iv(aead: Algorithm, prk: &[u8], out: &mut [u8]) -> Result<()> {
     const LABEL: &[u8] = b"quic iv";
 
@@ -688,6 +622,7 @@ pub fn derive_pkt_iv(aead: Algorithm, prk: &[u8], out: &mut [u8]) -> Result<()> 
     hkdf_expand_label(aead, prk, LABEL, &mut out[..nonce_len])
 }
 
+#[cfg(test)]
 fn hkdf_expand_label(
     alg: Algorithm, prk: &[u8], label: &[u8], out: &mut [u8],
 ) -> Result<()> {
@@ -702,19 +637,6 @@ fn hkdf_expand_label(
     hkdf_expand(alg, out, prk, &info)?;
 
     Ok(())
-}
-
-fn make_nonce(iv: &[u8], counter: u64) -> [u8; MAX_NONCE_LEN] {
-    let mut nonce = [0; MAX_NONCE_LEN];
-    nonce.copy_from_slice(iv);
-
-    // XOR the last bytes of the IV with the counter. This is equivalent to
-    // left-padding the counter with zero bytes.
-    for (a, b) in nonce[4..].iter_mut().zip(counter.to_be_bytes().iter()) {
-        *a ^= b;
-    }
-
-    nonce
 }
 
 pub fn verify_slices_are_equal(a: &[u8], b: &[u8]) -> Result<()> {
@@ -860,7 +782,7 @@ mod tests {
     }
 }
 
-#[cfg(feature = "rustls-aws-lc-rs")]
-mod aws_lc;
-#[cfg(feature = "rustls-aws-lc-rs")]
-pub(crate) use aws_lc::*;
+#[cfg(feature = "rustls")]
+mod rustls_provider;
+#[cfg(feature = "rustls")]
+pub(crate) use rustls_provider::*;

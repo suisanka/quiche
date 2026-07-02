@@ -24,11 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(feature = "rustls-aws-lc-rs")]
+#[cfg(feature = "rustls")]
 mod rustls;
 
-#[cfg(feature = "rustls-aws-lc-rs")]
+#[cfg(feature = "rustls")]
 pub use self::rustls::*;
 
-#[cfg(not(feature = "rustls-aws-lc-rs"))]
-compile_error!("quiche requires the rustls-aws-lc-rs TLS backend feature");
+#[cfg(not(feature = "rustls"))]
+compile_error!("quiche requires the rustls TLS backend feature");

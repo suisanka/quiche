@@ -27,12 +27,14 @@ workspace = true
 [features]
 default = ["rustls-aws-lc-rs"]
 
-# Use rustls with the aws-lc-rs crypto provider.
-rustls-aws-lc-rs = [
+# Use rustls with an application-installed crypto provider.
+rustls = [
   "dep:rustls",
-  "dep:rustls-aws-lc-rs",
   "rustls/webpki",
 ]
+
+# Use rustls with the aws-lc-rs crypto provider as the fallback provider.
+rustls-aws-lc-rs = ["rustls", "dep:rustls-aws-lc-rs"]
 
 # Allow client connections to provide a custom DCID when initiating a
 # connection. Be aware that RFC 9000 places requirements for unpredictability and
@@ -72,7 +74,6 @@ cdylib-link-lines = { version = "0.1", optional = true }
 
 [dependencies]
 bytes = { workspace = true }
-aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
 debug_panic = { workspace = true }
 either = { version = "1.8", default-features = false }
 intrusive-collections = "0.9.5"
