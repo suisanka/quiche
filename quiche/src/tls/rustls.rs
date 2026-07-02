@@ -727,7 +727,9 @@ impl Handshake {
                         Some(crypto::Seal::from_rustls(keys.local, Some(next)));
 
                     self.write_level = crypto::Level::OneRTT;
-                    self.early_data_active = false;
+                    if !ex_data.is_server {
+                        self.early_data_active = false;
+                    }
                 },
 
                 None if consumed_key_change => continue,
@@ -752,6 +754,7 @@ impl Handshake {
                 app_crypto.crypto_0rtt_open =
                     Some(crypto::Open::from_rustls(keys, None));
             }
+            self.early_data_active = true;
 
             return;
         }
@@ -2927,6 +2930,7 @@ mod tests {
         }
 
         assert!(resumed_server.is_resumed());
+        assert!(resumed_server.is_in_early_data());
         assert!(resumed_server_crypto_ctx[packet::Epoch::Application]
             .crypto_0rtt_open
             .is_some());

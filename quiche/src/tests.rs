@@ -1209,9 +1209,10 @@ fn zero_rtt(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
 
     // Server receives packets.
     assert_eq!(pipe.server_recv(&mut initial), Ok(initial.len()));
-    assert!(pipe.server.is_in_early_data());
+    assert_eq!(pipe.client_send_remaining_initial(&mut buf), Ok(()));
 
     assert_eq!(pipe.server_recv(&mut zrtt), Ok(zrtt.len()));
+    assert!(pipe.server.is_in_early_data());
 
     // 0-RTT stream data is readable.
     let mut r = pipe.server.readable();
