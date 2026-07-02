@@ -479,6 +479,69 @@ fn handshake(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
 }
 
 #[rstest]
+fn export_keying_material(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    let mut client_out = [0; 32];
+    let mut server_out = [0; 32];
+
+    assert_eq!(
+        pipe.client.export_keying_material(
+            &mut client_out,
+            b"EXPORTER-rtuic-register",
+            Some(b"register-token"),
+        ),
+        Err(Error::InvalidState)
+    );
+
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    assert_eq!(
+        pipe.client.export_keying_material(
+            &mut client_out,
+            b"EXPORTER-rtuic-register",
+            Some(b"register-token"),
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        pipe.server.export_keying_material(
+            &mut server_out,
+            b"EXPORTER-rtuic-register",
+            Some(b"register-token"),
+        ),
+        Ok(())
+    );
+
+    assert_eq!(client_out, server_out);
+
+    let mut repeated_out = [0; 32];
+    assert_eq!(
+        pipe.client.export_keying_material(
+            &mut repeated_out,
+            b"EXPORTER-rtuic-register",
+            Some(b"register-token"),
+        ),
+        Ok(())
+    );
+
+    assert_eq!(repeated_out, client_out);
+
+    let mut different_context_out = [0; 32];
+    assert_eq!(
+        pipe.client.export_keying_material(
+            &mut different_context_out,
+            b"EXPORTER-rtuic-register",
+            Some(b"different-context"),
+        ),
+        Ok(())
+    );
+
+    assert_ne!(different_context_out, client_out);
+}
+
+#[rstest]
 fn handshake_done(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {

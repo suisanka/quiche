@@ -7255,6 +7255,26 @@ impl<F: BufFactory> Connection<F> {
         self.handshake.server_name()
     }
 
+    /// Exports TLS keying material from the completed connection handshake.
+    ///
+    /// The output buffer is filled with keying material derived from the
+    /// connection's standard TLS exporter secret, using the provided `label`
+    /// and optional `context`.
+    ///
+    /// This returns [`InvalidState`] if the handshake is not complete.
+    ///
+    /// [`InvalidState`]: enum.Error.html#variant.InvalidState
+    #[inline]
+    pub fn export_keying_material(
+        &mut self, out: &mut [u8], label: &[u8], context: Option<&[u8]>,
+    ) -> Result<()> {
+        if !self.handshake_completed {
+            return Err(Error::InvalidState);
+        }
+
+        self.handshake.export_keying_material(out, label, context)
+    }
+
     /// Returns the peer's leaf certificate (if any) as a DER-encoded buffer.
     #[inline]
     pub fn peer_cert(&self) -> Option<&[u8]> {

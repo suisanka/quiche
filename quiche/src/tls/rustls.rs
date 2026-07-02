@@ -124,6 +124,7 @@ impl Context {
             server_name: None,
             local_transport_params: Vec::new(),
             conn: None,
+            exporter: None,
             write_level: crypto::Level::Initial,
             early_data_active: false,
             signature_scheme: Arc::new(Mutex::new(None)),
@@ -248,6 +249,7 @@ pub struct Handshake {
     server_name: Option<String>,
     local_transport_params: Vec<u8>,
     conn: Option<::rustls::quic::Connection>,
+    exporter: Option<::rustls::KeyingMaterialExporter>,
     write_level: crypto::Level,
     early_data_active: bool,
     signature_scheme: Arc<Mutex<Option<SignatureScheme>>>,
@@ -375,8 +377,34 @@ impl Handshake {
         )
     }
 
+    pub fn export_keying_material(
+        &mut self, out: &mut [u8], label: &[u8], context: Option<&[u8]>,
+    ) -> Result<()> {
+        if !self.is_completed() {
+            return Err(Error::InvalidState);
+        }
+
+        if self.exporter.is_none() {
+            let exporter = match self.conn.as_mut().ok_or(Error::InvalidState)? {
+                ::rustls::quic::Connection::Client(conn) => conn.exporter(),
+                ::rustls::quic::Connection::Server(conn) => conn.exporter(),
+            }
+            .map_err(|_| Error::TlsFail)?;
+
+            self.exporter = Some(exporter);
+        }
+
+        self.exporter
+            .as_ref()
+            .ok_or(Error::TlsFail)?
+            .derive(label, context, out)
+            .map(|_| ())
+            .map_err(|_| Error::TlsFail)
+    }
+
     pub fn clear(&mut self) -> Result<()> {
         self.conn = None;
+        self.exporter = None;
         self.write_level = crypto::Level::Initial;
         self.early_data_active = false;
         if let Ok(mut scheme) = self.signature_scheme.lock() {
