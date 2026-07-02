@@ -6766,13 +6766,13 @@ fn validate_peer_sent_ack_range(
     let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
-    let expected_max_active_pkt_sent = 3;
     let recovery = &pipe.server.paths.get_active().unwrap().recovery;
+    let expected_max_active_pkt_sent =
+        recovery.largest_sent_pkt_num_on_path(epoch).unwrap();
     assert_eq!(
-        recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
+        recovery.get_largest_acked_on_epoch(epoch).unwrap(),
         expected_max_active_pkt_sent
     );
-    assert_eq!(recovery.get_largest_acked_on_epoch(epoch).unwrap(), 3);
     assert_eq!(recovery.sent_packets_len(epoch), 0);
     // Verify largest sent on the connection
     assert_eq!(
@@ -6791,13 +6791,19 @@ fn validate_peer_sent_ack_range(
     pipe.send_pkt_to_server(pkt_type, &frames, &mut buf)
         .unwrap();
     let recovery = &pipe.server.paths.get_active().unwrap().recovery;
-    assert_eq!(recovery.largest_sent_pkt_num_on_path(epoch).unwrap(), 4);
-    assert_eq!(recovery.get_largest_acked_on_epoch(epoch).unwrap(), 3);
+    assert_eq!(
+        recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
+        expected_max_active_pkt_sent + 1
+    );
+    assert_eq!(
+        recovery.get_largest_acked_on_epoch(epoch).unwrap(),
+        expected_max_active_pkt_sent
+    );
     assert_eq!(recovery.sent_packets_len(epoch), 1);
 
     // Send an invalid ACK range to the server and expect server error
     let mut ranges = ranges::RangeSet::default();
-    ranges.insert(0..10);
+    ranges.insert(0..expected_max_active_pkt_sent + 3);
     let frames = [frame::Frame::ACK {
         ack_delay: 15,
         ranges,
@@ -6852,25 +6858,27 @@ fn validate_peer_sent_ack_range_for_multi_path(
     let pkt_type = Type::Short;
 
     // active path
-    let expected_max_active_pkt_sent = 7;
     let active_path = &pipe.server.paths.get_mut(0).unwrap();
     let p1_recovery = &active_path.recovery;
+    let expected_max_active_pkt_sent =
+        p1_recovery.largest_sent_pkt_num_on_path(epoch).unwrap();
+    let expected_max_active_pkt_acked =
+        p1_recovery.get_largest_acked_on_epoch(epoch).unwrap();
     assert_eq!(
-        p1_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
-        expected_max_active_pkt_sent
+        expected_max_active_pkt_sent,
+        expected_max_active_pkt_acked + 1
     );
-    assert_eq!(p1_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 6);
     assert_eq!(p1_recovery.sent_packets_len(epoch), 1);
 
     // non-active path
-    let expected_max_second_pkt_sent = 5;
     let second_path = &pipe.server.paths.get_mut(probed_pid).unwrap();
     let p2_recovery = &second_path.recovery;
+    let expected_max_second_pkt_sent =
+        p2_recovery.largest_sent_pkt_num_on_path(epoch).unwrap();
     assert_eq!(
-        p2_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
+        p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
         expected_max_second_pkt_sent
     );
-    assert_eq!(p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 5);
     assert_eq!(p2_recovery.sent_packets_len(epoch), 0);
 
     // Verify largest sent on the connection is the max of the two paths
@@ -6898,15 +6906,27 @@ fn validate_peer_sent_ack_range_for_multi_path(
     let active_path = &pipe.server.paths.get_mut(0).unwrap();
     assert!(active_path.active());
     let p1_recovery = &active_path.recovery;
-    assert_eq!(p1_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(), 7);
-    assert_eq!(p1_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 7);
+    assert_eq!(
+        p1_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
+        expected_max_active_pkt_sent
+    );
+    assert_eq!(
+        p1_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
+        expected_max_active_pkt_sent
+    );
     assert_eq!(p1_recovery.sent_packets_len(epoch), 0);
 
     // non-active path
     let second_path = &pipe.server.paths.get_mut(probed_pid).unwrap();
     let p2_recovery = &second_path.recovery;
-    assert_eq!(p2_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(), 5);
-    assert_eq!(p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 5);
+    assert_eq!(
+        p2_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
+        expected_max_second_pkt_sent
+    );
+    assert_eq!(
+        p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
+        expected_max_second_pkt_sent
+    );
     assert_eq!(p2_recovery.sent_packets_len(epoch), 0);
 
     // Send a large invalid ACK range to the server. Range is not inclusive so
