@@ -25,19 +25,6 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 pub(crate) fn rand_bytes(buf: &mut [u8]) {
-    fill_random(buf);
-}
-
-#[cfg(feature = "boringssl-boring-crate")]
-fn fill_random(buf: &mut [u8]) {
-    boring::rand::rand_bytes(buf).expect("BoringSSL RAND_bytes never fails");
-}
-
-#[cfg(all(
-    not(feature = "boringssl-boring-crate"),
-    feature = "rustls-aws-lc-rs"
-))]
-fn fill_random(buf: &mut [u8]) {
     use aws_lc_rs::rand::SecureRandom;
 
     let rng = aws_lc_rs::rand::SystemRandom::new();
@@ -47,22 +34,6 @@ fn fill_random(buf: &mut [u8]) {
 }
 
 pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    sign_hmac_sha256(key, data)
-}
-
-#[cfg(feature = "boringssl-boring-crate")]
-fn sign_hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let tag = boring::hash::hmac_sha256(key, data).expect("HMAC-SHA256 failed");
-    let mut out = [0; 32];
-    out.copy_from_slice(tag.as_ref());
-    out
-}
-
-#[cfg(all(
-    not(feature = "boringssl-boring-crate"),
-    feature = "rustls-aws-lc-rs"
-))]
-fn sign_hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, key);
     let tag = aws_lc_rs::hmac::sign(&key, data);
     let mut out = [0; 32];
@@ -71,18 +42,5 @@ fn sign_hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 }
 
 pub(crate) fn verify_slices_are_equal(a: &[u8], b: &[u8]) -> bool {
-    constant_time_eq(a, b)
-}
-
-#[cfg(feature = "boringssl-boring-crate")]
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    boring::memcmp::eq(a, b)
-}
-
-#[cfg(all(
-    not(feature = "boringssl-boring-crate"),
-    feature = "rustls-aws-lc-rs"
-))]
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
 }

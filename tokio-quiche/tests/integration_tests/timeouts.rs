@@ -24,8 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(feature = "boringssl-boring-crate")]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -41,97 +39,10 @@ use h3i::quiche::{
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 use tokio_quiche::http3::driver::H3ConnectionError;
-#[cfg(feature = "boringssl-boring-crate")]
-use tokio_quiche::quic::ConnectionHook;
-#[cfg(feature = "boringssl-boring-crate")]
-use tokio_quiche::settings::TlsCertificatePaths;
 use url::Url;
 
 use crate::fixtures::h3i_fixtures::*;
 use crate::fixtures::*;
-
-// TODO(erittenhouse): figure out a way to avoid all of this duplication
-#[cfg(feature = "boringssl-boring-crate")]
-#[tokio::test]
-async fn test_handshake_duration_ioworker() {
-    use boring::ssl::BoxSelectCertFinish;
-    use boring::ssl::ClientHello;
-    use boring::ssl::SslContextBuilder;
-    use boring::ssl::SslFiletype;
-    use boring::ssl::SslMethod;
-    use h3i::client::ClientError;
-
-    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
-    struct TestAsyncCallbackConnectionHook {
-        was_called: Arc<AtomicBool>,
-    }
-
-    impl ConnectionHook for TestAsyncCallbackConnectionHook {
-        fn create_custom_ssl_context_builder(
-            &self, _settings: TlsCertificatePaths<'_>,
-        ) -> Option<SslContextBuilder> {
-            let mut ssl_ctx_builder =
-                SslContextBuilder::new(SslMethod::tls()).ok()?;
-            let cloned_bool = Arc::clone(&self.was_called);
-
-            ssl_ctx_builder.set_async_select_certificate_callback(move |_| {
-                cloned_bool.store(true, Ordering::SeqCst);
-
-                Ok(Box::pin(async {
-                    // Pause during the handshake. Give some extra time to
-                    // (hopefully) avoid flakiness.
-                    tokio::time::sleep(HANDSHAKE_TIMEOUT.mul_f32(1.5)).await;
-                    Ok(Box::new(|_: ClientHello<'_>| Ok(()))
-                        as BoxSelectCertFinish)
-                }))
-            });
-
-            ssl_ctx_builder
-                .set_private_key_file(TEST_KEY_FILE, SslFiletype::PEM)
-                .unwrap();
-
-            ssl_ctx_builder
-                .set_certificate_chain_file(TEST_CERT_FILE)
-                .unwrap();
-
-            Some(ssl_ctx_builder)
-        }
-    }
-
-    let hook = Arc::new(TestAsyncCallbackConnectionHook {
-        was_called: Arc::new(AtomicBool::new(false)),
-    });
-
-    let mut quic_settings = QuicSettings::default();
-    quic_settings.max_idle_timeout = Some(Duration::from_secs(5));
-    quic_settings.handshake_timeout = Some(HANDSHAKE_TIMEOUT);
-
-    let (url, _) = start_server_with_settings(
-        quic_settings,
-        Http3Settings {
-            post_accept_timeout: Some(HANDSHAKE_TIMEOUT),
-            ..Default::default()
-        },
-        hook.clone(),
-        handle_connection,
-    );
-
-    // TODO: migrate to h3i client to assert a CONNECTION_CLOSE was received. This
-    // will have to be the sync version so as to isolate the tokio-quiche IO
-    // loop.
-    //
-    // Unfortunately we can't PCAP this test since encryption keys don't seem to
-    // get dumped.
-    //
-    // build() spawns the InboundPacketRouter and sends the Initial, which will
-    // kick the handshake off on the server-side. If all goes well, the server
-    // will close the connection and the router will time the connection out.
-    let url = format!("{url}/1");
-    let client_res = h3i_fixtures::request(&url, 1).await;
-
-    assert!(matches!(client_res, Err(ClientError::HandshakeFail)));
-    assert!(hook.was_called.load(Ordering::SeqCst));
-}
 
 #[tokio::test]
 async fn test_handshake_timeout_with_one_client_flight() {

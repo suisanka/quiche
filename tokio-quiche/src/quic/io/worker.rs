@@ -53,8 +53,6 @@ use crate::quic::router::ConnectionMapCommand;
 use crate::quic::QuicheConnection;
 use crate::QuicResult;
 
-#[cfg(feature = "boringssl-boring-crate")]
-use boring::ssl::SslRef;
 use datagram_socket::DatagramSocketSend;
 use datagram_socket::DatagramSocketSendExt;
 use datagram_socket::MaybeConnectedSocket;
@@ -779,14 +777,6 @@ pub struct Running<Tx, M, A> {
     pub(crate) qconn: Box<QuicheConnection>,
 }
 
-impl<Tx, M, A> Running<Tx, M, A> {
-    #[cfg(feature = "boringssl-boring-crate")]
-    pub fn ssl(&mut self) -> &mut SslRef {
-        // Deref to pick `Connection::as_mut` over `Box::as_mut`.
-        (*self.qconn).as_mut()
-    }
-}
-
 pub(crate) struct Closing<Tx, M, A> {
     pub(crate) params: IoWorkerParams<Tx, M>,
     pub(crate) context: ConnectionStageContext<A>,
@@ -812,23 +802,6 @@ where
     where
         A: ApplicationOverQuic,
     {
-        #[cfg(feature = "boringssl-boring-crate")]
-        {
-            // This makes an assumption that the waker being set in ex_data is
-            // stable across the active task's lifetime. Moving a future that
-            // encompasses an async callback from this task across a channel, for
-            // example, will cause issues as this waker will then be stale and
-            // attempt to wake the wrong task.
-            std::future::poll_fn(|cx| {
-                // Deref to pick `Connection::as_mut` over `Box::as_mut`.
-                let ssl = (*qconn).as_mut();
-                ssl.set_task_waker(Some(cx.waker().clone()));
-
-                Poll::Ready(())
-            })
-            .await;
-        }
-
         #[cfg(target_os = "linux")]
         if let Some(incoming) = ctx.in_pkt.as_mut() {
             self.audit_log_stats

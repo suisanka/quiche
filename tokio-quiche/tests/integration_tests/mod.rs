@@ -40,8 +40,6 @@ use tokio_quiche::settings::TlsCertificatePaths;
 use tokio_quiche::ConnectionParams;
 use tokio_quiche::InitialQuicConnection;
 
-#[cfg(feature = "boringssl-boring-crate")]
-pub mod async_callbacks;
 pub mod connection_close;
 pub mod headers;
 pub mod migration;
@@ -74,9 +72,6 @@ async fn echo() {
 
         assert_eq!(resps.len(), req_count(i));
     }
-
-    #[cfg(feature = "boringssl-boring-crate")]
-    assert!(_hook.was_called());
 }
 
 #[tokio::test]
@@ -91,8 +86,6 @@ async fn e2e() {
 
     let resps = res_map.get(&1).unwrap();
     assert_eq!(resps.len(), 1);
-    #[cfg(feature = "boringssl-boring-crate")]
-    assert!(_hook.was_called());
 }
 
 #[tokio::test]
@@ -121,8 +114,6 @@ async fn e2e_client_ip_validation_disabled() {
 
     let resps = res_map.get(&1).unwrap();
     assert_eq!(resps.len(), 1);
-    #[cfg(feature = "boringssl-boring-crate")]
-    assert!(hook.was_called());
 }
 
 #[with_test_telemetry(tokio::test)]

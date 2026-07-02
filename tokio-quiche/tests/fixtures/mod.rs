@@ -54,7 +54,6 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -85,31 +84,15 @@ pub const TEST_KEY_FILE: &str = concat!(
     "../quiche/examples/cert.key"
 );
 
-pub struct TestConnectionHook {
-    was_called: Arc<AtomicBool>,
-}
+pub struct TestConnectionHook;
 
 impl TestConnectionHook {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            was_called: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    pub fn was_called(&self) -> bool {
-        self.was_called.load(Ordering::SeqCst)
+        Arc::new(Self)
     }
 }
 
-impl ConnectionHook for TestConnectionHook {
-    #[cfg(feature = "boringssl-boring-crate")]
-    fn create_custom_ssl_context_builder(
-        &self, _settings: TlsCertificatePaths<'_>,
-    ) -> Option<boring::ssl::SslContextBuilder> {
-        self.was_called.store(true, Ordering::SeqCst);
-        None
-    }
-}
+impl ConnectionHook for TestConnectionHook {}
 
 pub async fn request(
     url: String, count: u64,

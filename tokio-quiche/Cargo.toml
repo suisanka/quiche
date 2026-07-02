@@ -15,14 +15,12 @@ default = ["rustls-aws-lc-rs", "qlog-gzip", "qlog-zstd"]
 
 # Use the BoringSSL library provided by the boring crate.
 boringssl-boring-crate = [
-  "dep:boring",
   "h3i/boringssl-boring-crate",
   "quiche/boringssl-boring-crate",
 ]
 
 # Use rustls with the aws-lc-rs crypto provider.
 rustls-aws-lc-rs = [
-  "dep:aws-lc-rs",
   "h3i/rustls-aws-lc-rs",
   "quiche/rustls-aws-lc-rs",
 ]
@@ -36,7 +34,7 @@ quiche_internal = ["quiche/internal"]
 perf-quic-listener-metrics = []
 
 # Enable raw public key (RPK) support for QUIC handshakes.
-rpk = ["boringssl-boring-crate", "boring/rpk"]
+rpk = ["boringssl-boring-crate", "dep:boring", "boring/rpk"]
 
 # Replaces quiche's original congestion control
 # implementation with one adapted from google/quiche.
@@ -82,7 +80,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-aws-lc-rs = { workspace = true, optional = true }
+aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
 boring = { workspace = true, optional = true }
 bytes = { workspace = true }
 crossbeam = { workspace = true, default-features = false }

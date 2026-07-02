@@ -55,9 +55,6 @@ use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
-#[cfg(feature = "boringssl-boring-crate")]
-use boring::ssl::SslRef;
-
 use self::error::make_handshake_result;
 use super::io::connection_stage::Close;
 use super::io::connection_stage::ConnectionStageContext;
@@ -273,14 +270,6 @@ where
     /// The remote address for this connection.
     pub fn peer_addr(&self) -> SocketAddr {
         self.params.peer_addr
-    }
-
-    /// [boring]'s SSL object for this connection.
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[doc(hidden)]
-    pub fn ssl_mut(&mut self) -> &mut SslRef {
-        // Deref to pick `Connection::as_mut` over `Box::as_mut`.
-        (*self.params.quiche_conn).as_mut()
     }
 
     /// A handle to the [`QuicAuditStats`] for this connection.
