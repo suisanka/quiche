@@ -29,6 +29,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::io::Write;
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -37,8 +38,8 @@ use std::time::Duration;
 
 use ::rustls::client::ClientSessionKey;
 use ::rustls::client::ClientSessionStore;
-use ::rustls::client::Tls12ClientSessionValue;
-use ::rustls::client::Tls13ClientSessionValue;
+use ::rustls::client::Tls12Session;
+use ::rustls::client::Tls13Session;
 use ::rustls::crypto::kx::NamedGroup;
 use ::rustls::crypto::CipherSuite;
 use ::rustls::crypto::Credentials;
@@ -55,6 +56,8 @@ use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
 use ::rustls::pki_types::SubjectPublicKeyInfoDer;
+use ::rustls::quic::Connection as _;
+use ::rustls::server::ServerSessionKey;
 use ::rustls::server::StoresServerSessions;
 use ::rustls::DistinguishedName;
 use ::rustls::RootCertStore;
@@ -239,7 +242,7 @@ pub struct Handshake {
     is_server: Option<bool>,
     server_name: Option<String>,
     local_transport_params: Vec<u8>,
-    conn: Option<::rustls::quic::Connection>,
+    conn: Option<QuicConnection>,
     exporter: Option<::rustls::KeyingMaterialExporter>,
     write_level: crypto::Level,
     early_data_active: bool,
@@ -249,6 +252,87 @@ pub struct Handshake {
     session_store: Arc<QuicheClientSessionStore>,
     #[cfg(test)]
     failing_private_key_method: bool,
+}
+
+#[derive(Debug)]
+enum QuicConnection {
+    Client(::rustls::quic::ClientConnection),
+    Server(::rustls::quic::ServerConnection),
+}
+
+impl QuicConnection {
+    fn exporter(
+        &mut self,
+    ) -> std::result::Result<::rustls::KeyingMaterialExporter, ::rustls::Error>
+    {
+        match self {
+            Self::Client(conn) => conn.exporter(),
+            Self::Server(conn) => conn.exporter(),
+        }
+    }
+}
+
+impl Deref for QuicConnection {
+    type Target = ::rustls::ConnectionOutputs;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Client(conn) => conn.deref(),
+            Self::Server(conn) => conn.deref(),
+        }
+    }
+}
+
+impl ::rustls::quic::Connection for QuicConnection {
+    fn quic_transport_parameters(&self) -> Option<&[u8]> {
+        match self {
+            Self::Client(conn) =>
+                ::rustls::quic::Connection::quic_transport_parameters(conn),
+
+            Self::Server(conn) =>
+                ::rustls::quic::Connection::quic_transport_parameters(conn),
+        }
+    }
+
+    fn zero_rtt_keys(&self) -> Option<::rustls::quic::DirectionalKeys> {
+        match self {
+            Self::Client(conn) => ::rustls::quic::Connection::zero_rtt_keys(conn),
+
+            Self::Server(conn) => ::rustls::quic::Connection::zero_rtt_keys(conn),
+        }
+    }
+
+    fn read_hs(
+        &mut self, plaintext: &[u8],
+    ) -> std::result::Result<(), ::rustls::Error> {
+        match self {
+            Self::Client(conn) =>
+                ::rustls::quic::Connection::read_hs(conn, plaintext),
+
+            Self::Server(conn) =>
+                ::rustls::quic::Connection::read_hs(conn, plaintext),
+        }
+    }
+
+    fn write_hs(
+        &mut self, buf: &mut Vec<u8>,
+    ) -> Option<::rustls::quic::KeyChange> {
+        match self {
+            Self::Client(conn) => ::rustls::quic::Connection::write_hs(conn, buf),
+
+            Self::Server(conn) => ::rustls::quic::Connection::write_hs(conn, buf),
+        }
+    }
+
+    fn is_handshaking(&self) -> bool {
+        match self {
+            Self::Client(conn) =>
+                ::rustls::quic::Connection::is_handshaking(conn),
+
+            Self::Server(conn) =>
+                ::rustls::quic::Connection::is_handshaking(conn),
+        }
+    }
 }
 
 impl Handshake {
@@ -297,7 +381,7 @@ impl Handshake {
 
     pub fn server_name(&self) -> Option<&str> {
         match &self.conn {
-            Some(::rustls::quic::Connection::Server(conn)) =>
+            Some(QuicConnection::Server(conn)) =>
                 conn.server_name().map(|name| name.as_ref()),
 
             _ => self.server_name.as_deref(),
@@ -376,11 +460,12 @@ impl Handshake {
         }
 
         if self.exporter.is_none() {
-            let exporter = match self.conn.as_mut().ok_or(Error::InvalidState)? {
-                ::rustls::quic::Connection::Client(conn) => conn.exporter(),
-                ::rustls::quic::Connection::Server(conn) => conn.exporter(),
-            }
-            .map_err(|_| Error::TlsFail)?;
+            let exporter = self
+                .conn
+                .as_mut()
+                .ok_or(Error::InvalidState)?
+                .exporter()
+                .map_err(|_| Error::TlsFail)?;
 
             self.exporter = Some(exporter);
         }
@@ -455,7 +540,7 @@ impl Handshake {
         0
     }
 
-    fn connection(&mut self) -> Result<&mut ::rustls::quic::Connection> {
+    fn connection(&mut self) -> Result<&mut QuicConnection> {
         if self.conn.is_none() {
             self.conn = Some(self.build_connection()?);
         }
@@ -463,14 +548,14 @@ impl Handshake {
         Ok(self.conn.as_mut().expect("connection was just initialized"))
     }
 
-    fn build_connection(&self) -> Result<::rustls::quic::Connection> {
+    fn build_connection(&self) -> Result<QuicConnection> {
         match self.is_server.ok_or(Error::TlsFail)? {
             true => self.build_server_connection(),
             false => self.build_client_connection(),
         }
     }
 
-    fn build_client_connection(&self) -> Result<::rustls::quic::Connection> {
+    fn build_client_connection(&self) -> Result<QuicConnection> {
         let server_name = self.server_name.as_deref().ok_or(Error::TlsFail)?;
         let server_name = ::rustls::pki_types::ServerName::try_from(server_name)
             .map_err(|_| Error::TlsFail)?
@@ -497,7 +582,6 @@ impl Handshake {
                             Arc::new(verifier),
                             self.signature_scheme.clone(),
                             root_store,
-                            Arc::clone(&self.provider),
                         ),
                     ))
             },
@@ -532,10 +616,10 @@ impl Handshake {
         )
         .map_err(|_| Error::TlsFail)?;
 
-        Ok(conn.into())
+        Ok(QuicConnection::Client(conn))
     }
 
-    fn build_server_connection(&self) -> Result<::rustls::quic::Connection> {
+    fn build_server_connection(&self) -> Result<QuicConnection> {
         let config = self.build_server_config()?;
 
         let conn = ::rustls::quic::ServerConnection::new(
@@ -545,7 +629,7 @@ impl Handshake {
         )
         .map_err(|_| Error::TlsFail)?;
 
-        Ok(conn.into())
+        Ok(QuicConnection::Server(conn))
     }
 
     fn build_server_config(&self) -> Result<::rustls::ServerConfig> {
@@ -690,7 +774,10 @@ impl Handshake {
 
     fn flush_session(&self, ex_data: &mut ExData) {
         if let Some(session) = self.session_store.take_exported_session() {
-            *ex_data.session = Some(session);
+            *ex_data.session = Some(encode_quiche_session(
+                &session,
+                self.quic_transport_params(),
+            ));
         }
     }
 
@@ -1088,8 +1175,8 @@ fn valid_at(
 }
 
 fn legacy_v1_server_identity_valid(
-    provider: &::rustls::crypto::CryptoProvider, root_store: &RootCertStore,
-    identity: &Identity<'_>, server_name: &::rustls::pki_types::ServerName<'_>,
+    root_store: &RootCertStore, identity: &Identity<'_>,
+    server_name: &::rustls::pki_types::ServerName<'_>,
     now: ::rustls::pki_types::UnixTime,
 ) -> bool {
     let Identity::X509(certificates) = identity else {
@@ -1123,7 +1210,6 @@ fn legacy_v1_server_identity_valid(
 
         let public_key = der_sequence(root.subject_public_key_info.as_ref());
         legacy_signature_valid(
-            provider,
             &public_key,
             cert.signature_algorithm,
             cert.tbs,
@@ -1172,7 +1258,6 @@ fn legacy_handshake_signature_algorithm(
 }
 
 fn legacy_handshake_signature_valid(
-    provider: &::rustls::crypto::CryptoProvider,
     input: &::rustls::client::danger::SignatureVerificationInput,
 ) -> bool {
     let Some(signature_algorithm) =
@@ -1198,7 +1283,6 @@ fn legacy_handshake_signature_valid(
     };
 
     legacy_signature_valid(
-        provider,
         public_key,
         signature_algorithm,
         input.message,
@@ -1207,8 +1291,8 @@ fn legacy_handshake_signature_valid(
 }
 
 fn legacy_signature_valid(
-    provider: &::rustls::crypto::CryptoProvider, public_key_spki: &[u8],
-    signature_algorithm: &[u8], message: &[u8], signature: &[u8],
+    public_key_spki: &[u8], signature_algorithm: &[u8], message: &[u8],
+    signature: &[u8],
 ) -> bool {
     let Some((public_key_algorithm, public_key)) =
         subject_public_key(public_key_spki)
@@ -1216,9 +1300,7 @@ fn legacy_signature_valid(
         return false;
     };
 
-    provider
-        .signature_verification_algorithms
-        .all
+    ::rustls_aws_lc_rs::ALL_VERIFICATION_ALGS
         .iter()
         .any(|algorithm| {
             algorithm.public_key_alg_id().as_ref() == public_key_algorithm &&
@@ -1507,13 +1589,14 @@ impl fmt::Debug for QuicheServerSessionStore {
 }
 
 impl StoresServerSessions for QuicheServerSessionStore {
-    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
+    fn put(&self, key: ServerSessionKey<'_>, value: Vec<u8>) -> bool {
         let Ok(mut sessions) = self.sessions.lock() else {
             return false;
         };
+        let key = key.as_ref();
 
         if let Some(index) =
-            sessions.iter().position(|(existing, _)| *existing == key)
+            sessions.iter().position(|(existing, _)| existing == key)
         {
             sessions.remove(index);
         }
@@ -1522,12 +1605,13 @@ impl StoresServerSessions for QuicheServerSessionStore {
             sessions.pop_front();
         }
 
-        sessions.push_back((key, value));
+        sessions.push_back((key.to_vec(), value));
 
         true
     }
 
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn get(&self, key: ServerSessionKey<'_>) -> Option<Vec<u8>> {
+        let key = key.as_ref();
         self.sessions
             .lock()
             .ok()?
@@ -1536,7 +1620,8 @@ impl StoresServerSessions for QuicheServerSessionStore {
             .map(|(_, value)| value.clone())
     }
 
-    fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn take(&self, key: ServerSessionKey<'_>) -> Option<Vec<u8>> {
+        let key = key.as_ref();
         let mut sessions = self.sessions.lock().ok()?;
         let index = sessions
             .iter()
@@ -1558,7 +1643,7 @@ type RustlsSessionToken = [u8; RUSTLS_SESSION_TOKEN_LEN];
 
 struct RegisteredRustlsSession {
     key: ClientSessionKey<'static>,
-    value: Tls13ClientSessionValue,
+    value: Tls13Session,
 }
 
 static RUSTLS_SESSION_REGISTRY: OnceLock<
@@ -1573,8 +1658,8 @@ fn rustls_session_registry(
 #[derive(Default)]
 struct ClientSessionData {
     kx_hint: Option<NamedGroup>,
-    tls12: Option<Tls12ClientSessionValue>,
-    tls13: VecDeque<Tls13ClientSessionValue>,
+    tls12: Option<Tls12Session>,
+    tls13: VecDeque<Tls13Session>,
 }
 
 #[derive(Default)]
@@ -1612,20 +1697,19 @@ impl QuicheClientSessionStore {
     }
 
     fn export_tls13_ticket(
-        &self, key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+        &self, key: ClientSessionKey<'static>, value: Tls13Session,
     ) {
-        let peer_params = value.quic_params();
         let Some(token) = register_rustls_session(key, value) else {
             return;
         };
 
         if let Ok(mut session) = self.exported_session.lock() {
-            *session = Some(encode_quiche_session(&token, &peer_params));
+            *session = Some(token.to_vec());
         }
     }
 
     fn insert_imported_tls13_ticket(
-        &self, key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+        &self, key: ClientSessionKey<'static>, value: Tls13Session,
     ) {
         if let Ok(mut sessions) = self.sessions.lock() {
             let session = sessions.entry(key).or_default();
@@ -1661,16 +1745,14 @@ impl ClientSessionStore for QuicheClientSessionStore {
     }
 
     fn set_tls12_session(
-        &self, key: ClientSessionKey<'static>, value: Tls12ClientSessionValue,
+        &self, key: ClientSessionKey<'static>, value: Tls12Session,
     ) {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.entry(key).or_default().tls12 = Some(value);
         }
     }
 
-    fn tls12_session(
-        &self, key: &ClientSessionKey<'_>,
-    ) -> Option<Tls12ClientSessionValue> {
+    fn tls12_session(&self, key: &ClientSessionKey<'_>) -> Option<Tls12Session> {
         self.sessions
             .lock()
             .ok()?
@@ -1687,14 +1769,14 @@ impl ClientSessionStore for QuicheClientSessionStore {
     }
 
     fn insert_tls13_ticket(
-        &self, key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+        &self, key: ClientSessionKey<'static>, value: Tls13Session,
     ) {
         self.export_tls13_ticket(key, value);
     }
 
     fn take_tls13_ticket(
         &self, key: &ClientSessionKey<'static>,
-    ) -> Option<Tls13ClientSessionValue> {
+    ) -> Option<Tls13Session> {
         self.sessions
             .lock()
             .ok()?
@@ -1704,7 +1786,7 @@ impl ClientSessionStore for QuicheClientSessionStore {
 }
 
 fn register_rustls_session(
-    key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+    key: ClientSessionKey<'static>, value: Tls13Session,
 ) -> Option<RustlsSessionToken> {
     let mut token = [0; RUSTLS_SESSION_TOKEN_LEN];
     crypto::fill_random(&mut token).ok()?;
@@ -1913,7 +1995,6 @@ struct RecordingServerVerifier {
     inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
     signature_scheme: RecordedSignatureScheme,
     root_store: Arc<RootCertStore>,
-    provider: Arc<::rustls::crypto::CryptoProvider>,
 }
 
 impl RecordingServerVerifier {
@@ -1921,13 +2002,11 @@ impl RecordingServerVerifier {
         inner: Arc<dyn ::rustls::client::danger::ServerVerifier>,
         signature_scheme: RecordedSignatureScheme,
         root_store: Arc<RootCertStore>,
-        provider: Arc<::rustls::crypto::CryptoProvider>,
     ) -> Self {
         Self {
             inner,
             signature_scheme,
             root_store,
-            provider,
         }
     }
 
@@ -1960,7 +2039,6 @@ impl RecordingServerVerifier {
         &self, identity: &::rustls::client::danger::ServerIdentity,
     ) -> bool {
         legacy_v1_server_identity_valid(
-            &self.provider,
             &self.root_store,
             identity.identity,
             identity.server_name,
@@ -1976,7 +2054,7 @@ impl RecordingServerVerifier {
         ::rustls::Error,
     > {
         if unsupported_cert_version_error(&error) &&
-            legacy_handshake_signature_valid(&self.provider, input)
+            legacy_handshake_signature_valid(input)
         {
             record_signature_scheme(&self.signature_scheme, input);
 
@@ -2524,7 +2602,6 @@ mod tests {
         assert!(ctx.root_store.roots.iter().any(|root| {
             let public_key = der_sequence(root.subject_public_key_info.as_ref());
             legacy_signature_valid(
-                &ctx.provider,
                 &public_key,
                 legacy.signature_algorithm,
                 legacy.tbs,
@@ -2538,7 +2615,6 @@ mod tests {
             ::rustls::pki_types::ServerName::try_from("quic.tech").unwrap();
 
         assert!(legacy_v1_server_identity_valid(
-            &ctx.provider,
             &ctx.root_store,
             &identity,
             &server_name,

@@ -68,8 +68,8 @@ quiche = { version = "0.29.3", path = "./quiche", default-features = false }
 regex = { version = "1.4.2" }
 ring = { version = "0.17.8" }
 rstest = { version = "0.26.1" }
-rustls = { version = "0.24.0-dev.0", default-features = false, features = ["std"] }
-rustls-aws-lc-rs = { version = "0.1.0-dev.0", default-features = false, features = ["aws-lc-sys", "std"] }
+rustls = { git = "https://github.com/rustls/rustls", rev = "284e7f61bb8bf6cd9b7021654c8741a257b08235", default-features = false }
+rustls-aws-lc-rs = { git = "https://github.com/rustls/rustls", rev = "284e7f61bb8bf6cd9b7021654c8741a257b08235", default-features = false, features = ["aws-lc-sys", "std"] }
 serde = { version = "1" }
 serde_json = { version = "1" }
 serde_with = { version = "3.20.0", default-features = false }
